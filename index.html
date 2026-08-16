@@ -4,9 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#07111f">
-  <title>Crawl Form Analyzer v1.1</title>
+  <title>Crawl Form Analyzer v1.2</title>
+
+  <!-- v1.2: dynamic import をやめ、MediaPipe公式ドキュメントと同系統の
+       vision_bundle.js を通常の script タグで読み込む -->
+  <script
+    src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/vision_bundle.js"
+    crossorigin="anonymous"></script>
+
   <style>
-    :root{--bg:#07111f;--panel:#0d1b2a;--panel2:#10243a;--text:#f5f7fb;--muted:#9fb1c7;--ok:#38d39f;--bad:#ff667a;--line:#46b5ff}
+    :root{--panel:#0d1b2a;--panel2:#10243a;--text:#f5f7fb;--muted:#9fb1c7;--ok:#38d39f;--bad:#ff667a}
     *{box-sizing:border-box}
     body{margin:0;font-family:system-ui,-apple-system,"Segoe UI","Noto Sans JP",sans-serif;color:var(--text);background:linear-gradient(180deg,#07111f,#091827 55%,#07111f);min-height:100vh}
     .wrap{max-width:900px;margin:auto;padding:14px}
@@ -25,8 +32,8 @@
     .metric .value{font-size:31px;font-weight:800;line-height:1.15;margin-top:4px}
     .metric .quality{font-size:12px;margin-top:5px;color:var(--muted)}
     .buttons{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:10px}
-    button{appearance:none;border:none;border-radius:14px;padding:13px 11px;font-weight:800;font-size:15px;background:#1e88e5;color:white;min-height:48px}
-    button.secondary{background:#24384d} button.record{background:#d6455d} button.stop{background:#7a3342} button:disabled{opacity:.42}
+    button{appearance:none;border:none;border-radius:14px;padding:13px 11px;font-weight:800;font-size:15px;background:#1e88e5;color:#fff;min-height:48px}
+    button.secondary{background:#24384d}button.record{background:#d6455d}button.stop{background:#7a3342}button:disabled{opacity:.42}
     .notice{padding:9px 11px;border-radius:12px;background:#182d43;color:#d9e7f5;font-size:13px;margin-top:10px}
     .graphWrap{height:240px;background:#081522;border-radius:14px;overflow:hidden}
     canvas#graph{width:100%;height:100%}
@@ -34,13 +41,13 @@
     .pill{background:#142a42;padding:6px 10px;border-radius:999px;color:#cfe9ff;font-size:12px}
     .legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:12px;margin-top:8px}
     .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}.dot.r{background:#46b5ff}.dot.l{background:#38d39f}
-    .diag{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#c6d4e3;white-space:pre-wrap;word-break:break-word;background:#071522;border-radius:12px;padding:10px;max-height:180px;overflow:auto}
+    .diag{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#c6d4e3;white-space:pre-wrap;word-break:break-word;background:#071522;border-radius:12px;padding:10px;max-height:190px;overflow:auto}
   </style>
 </head>
 <body>
 <div class="wrap">
   <h1>🏊 Crawl Form Analyzer</h1>
-  <div class="sub">v1.1 — Android Chrome向け診断強化版</div>
+  <div class="sub">v1.2 — MediaPipe script読み込み版</div>
 
   <section class="card">
     <div class="stage">
@@ -61,7 +68,7 @@
       <button id="stopBtn" class="stop" disabled>■ 記録停止</button>
     </div>
 
-    <div class="notice" id="hint">AIの初期化が完了すると「カメラ開始」が有効になります。</div>
+    <div class="notice" id="hint">MediaPipeを確認しています…</div>
   </section>
 
   <section class="card">
@@ -78,123 +85,269 @@
 </div>
 
 <script>
-(async()=>{
-  const CDN_JS="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/+esm";
+(async function(){
   const WASM_BASE="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm";
-  const MODEL_URL="https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task";
+  const MODEL_URL="https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
 
   const $=id=>document.getElementById(id);
-  const video=$("video"), overlay=$("overlay"), ctx=overlay.getContext("2d"), statusEl=$("status"), diagEl=$("diag");
-  const rightAngleEl=$("rightAngle"), leftAngleEl=$("leftAngle"), rightQualityEl=$("rightQuality"), leftQualityEl=$("leftQuality");
-  const cameraBtn=$("cameraBtn"), flipBtn=$("flipBtn"), recordBtn=$("recordBtn"), stopBtn=$("stopBtn"), csvBtn=$("csvBtn"), clearBtn=$("clearBtn");
-  const sampleCountEl=$("sampleCount"), graph=$("graph"), gctx=graph.getContext("2d"), hint=$("hint");
+  const video=$("video"), overlay=$("overlay"), ctx=overlay.getContext("2d");
+  const statusEl=$("status"), diagEl=$("diag"), hint=$("hint");
+  const rightAngleEl=$("rightAngle"), leftAngleEl=$("leftAngle");
+  const rightQualityEl=$("rightQuality"), leftQualityEl=$("leftQuality");
+  const cameraBtn=$("cameraBtn"), flipBtn=$("flipBtn"), recordBtn=$("recordBtn"), stopBtn=$("stopBtn");
+  const csvBtn=$("csvBtn"), clearBtn=$("clearBtn"), sampleCountEl=$("sampleCount");
+  const graph=$("graph"), gctx=graph.getContext("2d");
 
-  let PoseLandmarker,FilesetResolver,DrawingUtils,poseLandmarker=null,stream=null,facingMode="user",running=false,lastVideoTime=-1,recording=false,recordStart=0,samples=[],rafId=null;
+  let PoseLandmarker, FilesetResolver, DrawingUtils, poseLandmarker;
+  let stream=null, facingMode="user", running=false, lastVideoTime=-1, recording=false, recordStart=0, samples=[], rafId=null;
 
-  const log=msg=>{diagEl.textContent+="\n["+new Date().toLocaleTimeString()+"] "+msg;diagEl.scrollTop=diagEl.scrollHeight};
-  const setStatus=(text,kind="")=>{statusEl.textContent=text;statusEl.className="status"+(kind?" "+kind:"");log(text)};
-  const fail=(stage,err)=>{setStatus(stage+"でエラー\n"+(err?.message||err||"不明なエラー"),"err");hint.textContent="赤いエラー表示と診断ログをスクリーンショットで送ってください。"};
+  function log(msg){
+    diagEl.textContent += "\n[" + new Date().toLocaleTimeString() + "] " + msg;
+    diagEl.scrollTop = diagEl.scrollHeight;
+  }
+  function setStatus(text,kind=""){
+    statusEl.textContent=text;
+    statusEl.className="status"+(kind?" "+kind:"");
+    log(text);
+  }
+  function fail(stage,err){
+    const msg=stage+"でエラー\n"+(err?.message||String(err)||"不明なエラー");
+    setStatus(msg,"err");
+    hint.textContent="赤いエラー表示と診断ログをスクリーンショットで送ってください。";
+  }
 
   addEventListener("error",e=>log("window error: "+(e.message||"unknown")));
   addEventListener("unhandledrejection",e=>log("unhandled rejection: "+(e.reason?.message||e.reason||"unknown")));
 
   try{
-    setStatus("1/4 MediaPipeライブラリ読込中…");
-    const mod=await import(CDN_JS);
-    ({PoseLandmarker,FilesetResolver,DrawingUtils}=mod);
-    if(!PoseLandmarker||!FilesetResolver||!DrawingUtils) throw new Error("MediaPipe APIが見つかりません");
-    log("MediaPipe import OK");
+    setStatus("1/4 MediaPipeライブラリ確認中…");
+
+    // vision_bundle.js は window.vision を公開する。
+    if(!window.vision){
+      throw new Error("window.vision が見つかりません。vision_bundle.js の読み込みに失敗しています。");
+    }
+    ({PoseLandmarker,FilesetResolver,DrawingUtils}=window.vision);
+    if(!PoseLandmarker||!FilesetResolver||!DrawingUtils){
+      throw new Error("PoseLandmarker / FilesetResolver / DrawingUtils が見つかりません。");
+    }
+    log("vision_bundle.js 読み込み OK");
 
     setStatus("2/4 WASM読込中…");
-    const vision=await FilesetResolver.forVisionTasks(WASM_BASE);
+    const visionFiles=await FilesetResolver.forVisionTasks(WASM_BASE);
     log("WASM resolver OK");
 
     setStatus("3/4 姿勢AIモデル読込中…");
     try{
-      poseLandmarker=await PoseLandmarker.createFromOptions(vision,{baseOptions:{modelAssetPath:MODEL_URL,delegate:"GPU"},runningMode:"VIDEO",numPoses:1,minPoseDetectionConfidence:.5,minPosePresenceConfidence:.5,minTrackingConfidence:.5});
-      log("GPU init OK");
-    }catch(e){
-      log("GPU初期化失敗→CPUへ: "+(e.message||e));
-      poseLandmarker=await PoseLandmarker.createFromOptions(vision,{baseOptions:{modelAssetPath:MODEL_URL},runningMode:"VIDEO",numPoses:1,minPoseDetectionConfidence:.5,minPosePresenceConfidence:.5,minTrackingConfidence:.5});
-      log("CPU init OK");
+      poseLandmarker=await PoseLandmarker.createFromOptions(visionFiles,{
+        baseOptions:{modelAssetPath:MODEL_URL,delegate:"GPU"},
+        runningMode:"VIDEO",
+        numPoses:1,
+        minPoseDetectionConfidence:.5,
+        minPosePresenceConfidence:.5,
+        minTrackingConfidence:.5
+      });
+      log("PoseLandmarker GPU init OK");
+    }catch(gpuErr){
+      log("GPU初期化失敗 → CPUへ切替: "+(gpuErr?.message||gpuErr));
+      poseLandmarker=await PoseLandmarker.createFromOptions(visionFiles,{
+        baseOptions:{modelAssetPath:MODEL_URL},
+        runningMode:"VIDEO",
+        numPoses:1,
+        minPoseDetectionConfidence:.5,
+        minPosePresenceConfidence:.5,
+        minTrackingConfidence:.5
+      });
+      log("PoseLandmarker CPU init OK");
     }
 
     setStatus("4/4 AI準備完了","ok");
     cameraBtn.disabled=false;
-    hint.textContent="「カメラ開始」を押してカメラを許可してください。";
-  }catch(e){ fail("AI初期化",e); }
+    hint.textContent="「カメラ開始」を押して、カメラ使用を許可してください。";
+  }catch(err){
+    fail("AI初期化",err);
+  }
 
   function angle3(a,b,c){
-    const bax=a.x-b.x,bay=a.y-b.y,bcx=c.x-b.x,bcy=c.y-b.y,dot=bax*bcx+bay*bcy,mag=Math.hypot(bax,bay)*Math.hypot(bcx,bcy);
+    const bax=a.x-b.x,bay=a.y-b.y,bcx=c.x-b.x,bcy=c.y-b.y;
+    const dot=bax*bcx+bay*bcy, mag=Math.hypot(bax,bay)*Math.hypot(bcx,bcy);
     if(!mag)return null;
     return Math.acos(Math.max(-1,Math.min(1,dot/mag)))*180/Math.PI;
   }
   const visibilityOk=(...pts)=>pts.every(p=>p&&(p.visibility??1)>.55);
-  const qualityText=(ok,pts)=>{if(!ok)return"検出が不安定";const q=Math.min(...pts.map(p=>p.visibility??1));return q>.85?"追跡 良好":q>.65?"追跡 普通":"追跡 弱め"};
+  const qualityText=(ok,pts)=>{
+    if(!ok)return"検出が不安定";
+    const q=Math.min(...pts.map(p=>p.visibility??1));
+    return q>.85?"追跡 良好":q>.65?"追跡 普通":"追跡 弱め";
+  };
 
   function resizeCanvas(){
-    if(video.videoWidth&&video.videoHeight&&(overlay.width!==video.videoWidth||overlay.height!==video.videoHeight)){overlay.width=video.videoWidth;overlay.height=video.videoHeight}
-  }
-  function drawPose(lm){
-    ctx.clearRect(0,0,overlay.width,overlay.height);if(!lm)return;
-    const d=new DrawingUtils(ctx);ctx.save();
-    if(facingMode==="user"){ctx.translate(overlay.width,0);ctx.scale(-1,1)}
-    d.drawConnectors(lm,PoseLandmarker.POSE_CONNECTIONS,{color:"#46b5ff",lineWidth:4});
-    d.drawLandmarks(lm,{color:"#fff",fillColor:"#38d39f",radius:4});
-    ctx.restore();
-  }
-  function updateAngles(lm){
-    const ls=lm[11],rs=lm[12],le=lm[13],re=lm[14],lw=lm[15],rw=lm[16];
-    const rOk=visibilityOk(rs,re,rw),lOk=visibilityOk(ls,le,lw),r=rOk?angle3(rs,re,rw):null,l=lOk?angle3(ls,le,lw):null;
-    rightAngleEl.textContent=r==null?"--°":Math.round(r)+"°";leftAngleEl.textContent=l==null?"--°":Math.round(l)+"°";
-    rightQualityEl.textContent=qualityText(rOk,[rs,re,rw]);leftQualityEl.textContent=qualityText(lOk,[ls,le,lw]);
-    if(recording&&(r!=null||l!=null)){samples.push({t:(performance.now()-recordStart)/1000,right:r,left:l});sampleCountEl.textContent=samples.length+" サンプル";if(samples.length%4===0)drawGraph()}
+    if(video.videoWidth&&video.videoHeight&&(overlay.width!==video.videoWidth||overlay.height!==video.videoHeight)){
+      overlay.width=video.videoWidth; overlay.height=video.videoHeight;
+    }
   }
 
-  async function loop(){
-    if(!running)return;resizeCanvas();
+  function drawPose(lm){
+    ctx.clearRect(0,0,overlay.width,overlay.height);
+    if(!lm)return;
+    const d=new DrawingUtils(ctx);
+    ctx.save();
+    if(facingMode==="user"){ctx.translate(overlay.width,0);ctx.scale(-1,1)}
+    d.drawConnectors(lm,PoseLandmarker.POSE_CONNECTIONS,{color:"#46b5ff",lineWidth:4});
+    d.drawLandmarks(lm,{color:"#ffffff",fillColor:"#38d39f",radius:4});
+    ctx.restore();
+  }
+
+  function updateAngles(lm){
+    const ls=lm[11],rs=lm[12],le=lm[13],re=lm[14],lw=lm[15],rw=lm[16];
+    const rOk=visibilityOk(rs,re,rw), lOk=visibilityOk(ls,le,lw);
+    const r=rOk?angle3(rs,re,rw):null, l=lOk?angle3(ls,le,lw):null;
+
+    rightAngleEl.textContent=r==null?"--°":Math.round(r)+"°";
+    leftAngleEl.textContent=l==null?"--°":Math.round(l)+"°";
+    rightQualityEl.textContent=qualityText(rOk,[rs,re,rw]);
+    leftQualityEl.textContent=qualityText(lOk,[ls,le,lw]);
+
+    if(recording&&(r!=null||l!=null)){
+      samples.push({t:(performance.now()-recordStart)/1000,right:r,left:l});
+      sampleCountEl.textContent=samples.length+" サンプル";
+      if(samples.length%4===0)drawGraph();
+    }
+  }
+
+  function predictionLoop(){
+    if(!running)return;
+    resizeCanvas();
+
     if(poseLandmarker&&video.readyState>=2&&video.currentTime!==lastVideoTime){
       lastVideoTime=video.currentTime;
       try{
-        poseLandmarker.detectForVideo(video,performance.now(),result=>{
-          const lm=result.landmarks?.[0];drawPose(lm);
-          if(lm){updateAngles(lm);statusEl.textContent=recording?"● 記録中":"人体を追跡中";statusEl.className="status ok"}
-          else{rightAngleEl.textContent=leftAngleEl.textContent="--°";rightQualityEl.textContent=leftQualityEl.textContent="未検出";statusEl.textContent="全身を画面に入れてください";statusEl.className="status"}
-        });
-      }catch(e){fail("姿勢推定",e);running=false;return}
+        const result=poseLandmarker.detectForVideo(video,performance.now());
+        const lm=result.landmarks?.[0];
+        drawPose(lm);
+        if(lm){
+          updateAngles(lm);
+          statusEl.textContent=recording?"● 記録中":"人体を追跡中";
+          statusEl.className="status ok";
+        }else{
+          rightAngleEl.textContent=leftAngleEl.textContent="--°";
+          rightQualityEl.textContent=leftQualityEl.textContent="未検出";
+          statusEl.textContent="全身を画面に入れてください";
+          statusEl.className="status";
+        }
+      }catch(err){
+        fail("姿勢推定",err);
+        running=false;
+        return;
+      }
     }
-    rafId=requestAnimationFrame(loop);
+    rafId=requestAnimationFrame(predictionLoop);
   }
 
   async function startCamera(){
-    if(!navigator.mediaDevices?.getUserMedia){fail("カメラ",new Error("getUserMediaが利用できません"));return}
+    if(!navigator.mediaDevices?.getUserMedia){
+      fail("カメラ",new Error("getUserMedia が利用できません。ChromeでHTTPS URLから開いてください。"));
+      return;
+    }
     if(stream)stream.getTracks().forEach(t=>t.stop());
+
     try{
       setStatus("カメラ起動中…");
-      stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:facingMode},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30,max:60}}});
-      video.srcObject=stream;await video.play();running=true;flipBtn.disabled=false;recordBtn.disabled=false;cameraBtn.textContent="📷 カメラ再起動";
-      setStatus("カメラ起動完了","ok");if(rafId)cancelAnimationFrame(rafId);loop();
-    }catch(e){fail("カメラ起動",e)}
+      stream=await navigator.mediaDevices.getUserMedia({
+        audio:false,
+        video:{
+          facingMode:{ideal:facingMode},
+          width:{ideal:1280},
+          height:{ideal:720},
+          frameRate:{ideal:30,max:60}
+        }
+      });
+      video.srcObject=stream;
+      await video.play();
+      running=true;
+      flipBtn.disabled=false;
+      recordBtn.disabled=false;
+      cameraBtn.textContent="📷 カメラ再起動";
+      setStatus("カメラ起動完了","ok");
+      if(rafId)cancelAnimationFrame(rafId);
+      predictionLoop();
+    }catch(err){
+      fail("カメラ起動",err);
+    }
   }
 
   cameraBtn.onclick=startCamera;
-  flipBtn.onclick=async()=>{facingMode=facingMode==="user"?"environment":"user";video.style.transform=facingMode==="user"?"scaleX(-1)":"none";await startCamera()};
-  recordBtn.onclick=()=>{samples=[];recording=true;recordStart=performance.now();recordBtn.disabled=true;stopBtn.disabled=false;csvBtn.disabled=true;sampleCountEl.textContent="0 サンプル";drawGraph()};
-  stopBtn.onclick=()=>{recording=false;recordBtn.disabled=false;stopBtn.disabled=true;csvBtn.disabled=samples.length===0;setStatus("記録終了","ok");drawGraph()};
-  clearBtn.onclick=()=>{samples=[];sampleCountEl.textContent="0 サンプル";csvBtn.disabled=true;drawGraph()};
-  csvBtn.onclick=()=>{if(!samples.length)return;const rows=["time_s,right_elbow_deg,left_elbow_deg",...samples.map(s=>[s.t.toFixed(3),s.right==null?"":s.right.toFixed(2),s.left==null?"":s.left.toFixed(2)].join(","))];const blob=new Blob([rows.join("\n")],{type:"text/csv;charset=utf-8"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="crawl_form_"+new Date().toISOString().replace(/[:.]/g,"-")+".csv";a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)};
+  flipBtn.onclick=async()=>{
+    facingMode=facingMode==="user"?"environment":"user";
+    video.style.transform=facingMode==="user"?"scaleX(-1)":"none";
+    await startCamera();
+  };
+  recordBtn.onclick=()=>{
+    samples=[]; recording=true; recordStart=performance.now();
+    recordBtn.disabled=true; stopBtn.disabled=false; csvBtn.disabled=true;
+    sampleCountEl.textContent="0 サンプル"; drawGraph();
+  };
+  stopBtn.onclick=()=>{
+    recording=false; recordBtn.disabled=false; stopBtn.disabled=true;
+    csvBtn.disabled=samples.length===0; setStatus("記録終了","ok"); drawGraph();
+  };
+  clearBtn.onclick=()=>{
+    samples=[]; sampleCountEl.textContent="0 サンプル"; csvBtn.disabled=true; drawGraph();
+  };
+  csvBtn.onclick=()=>{
+    if(!samples.length)return;
+    const rows=["time_s,right_elbow_deg,left_elbow_deg",
+      ...samples.map(s=>[
+        s.t.toFixed(3),
+        s.right==null?"":s.right.toFixed(2),
+        s.left==null?"":s.left.toFixed(2)
+      ].join(","))
+    ];
+    const blob=new Blob([rows.join("\n")],{type:"text/csv;charset=utf-8"});
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download="crawl_form_"+new Date().toISOString().replace(/[:.]/g,"-")+".csv";
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  };
 
   function drawGraph(){
-    const rect=graph.getBoundingClientRect(),dpr=devicePixelRatio||1;graph.width=Math.max(1,Math.round(rect.width*dpr));graph.height=Math.max(1,Math.round(rect.height*dpr));gctx.setTransform(dpr,0,0,dpr,0,0);
-    const w=rect.width,h=rect.height,p={l:42,r:12,t:12,b:28},iw=w-p.l-p.r,ih=h-p.t-p.b;gctx.clearRect(0,0,w,h);gctx.fillStyle="#081522";gctx.fillRect(0,0,w,h);
+    const rect=graph.getBoundingClientRect(),dpr=devicePixelRatio||1;
+    graph.width=Math.max(1,Math.round(rect.width*dpr));
+    graph.height=Math.max(1,Math.round(rect.height*dpr));
+    gctx.setTransform(dpr,0,0,dpr,0,0);
+
+    const w=rect.width,h=rect.height,p={l:42,r:12,t:12,b:28},iw=w-p.l-p.r,ih=h-p.t-p.b;
+    gctx.clearRect(0,0,w,h);
+    gctx.fillStyle="#081522";gctx.fillRect(0,0,w,h);
     gctx.strokeStyle="#27415b";gctx.fillStyle="#8ea4bc";gctx.font="11px system-ui";
-    [0,45,90,135,180].forEach(v=>{const y=p.t+ih*(1-v/180);gctx.beginPath();gctx.moveTo(p.l,y);gctx.lineTo(w-p.r,y);gctx.stroke();gctx.fillText(v+"°",5,y+4)});
-    if(!samples.length){gctx.fillStyle="#7890aa";gctx.font="14px system-ui";gctx.textAlign="center";gctx.fillText("記録するとここに角度変化が表示されます",w/2,h/2);gctx.textAlign="start";return}
-    const tmax=Math.max(.1,samples.at(-1).t);
-    const plot=(key,color)=>{gctx.strokeStyle=color;gctx.lineWidth=2;gctx.beginPath();let started=false;for(const s of samples){const v=s[key];if(v==null)continue;const x=p.l+iw*(s.t/tmax),y=p.t+ih*(1-v/180);if(!started){gctx.moveTo(x,y);started=true}else gctx.lineTo(x,y)}gctx.stroke()};
-    plot("right","#46b5ff");plot("left","#38d39f");
+
+    [0,45,90,135,180].forEach(v=>{
+      const y=p.t+ih*(1-v/180);
+      gctx.beginPath();gctx.moveTo(p.l,y);gctx.lineTo(w-p.r,y);gctx.stroke();
+      gctx.fillText(v+"°",5,y+4);
+    });
+
+    if(!samples.length){
+      gctx.fillStyle="#7890aa";gctx.font="14px system-ui";gctx.textAlign="center";
+      gctx.fillText("記録するとここに角度変化が表示されます",w/2,h/2);
+      gctx.textAlign="start";return;
+    }
+
+    const tmax=Math.max(.1,samples[samples.length-1].t);
+    const plot=(key,color)=>{
+      gctx.strokeStyle=color;gctx.lineWidth=2;gctx.beginPath();let started=false;
+      for(const s of samples){
+        const v=s[key];if(v==null)continue;
+        const x=p.l+iw*(s.t/tmax),y=p.t+ih*(1-v/180);
+        if(!started){gctx.moveTo(x,y);started=true}else gctx.lineTo(x,y);
+      }
+      gctx.stroke();
+    };
+    plot("right","#46b5ff"); plot("left","#38d39f");
   }
-  addEventListener("resize",drawGraph);drawGraph();
+
+  addEventListener("resize",drawGraph);
+  drawGraph();
 })();
 </script>
 </body>
