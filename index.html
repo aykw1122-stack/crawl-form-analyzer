@@ -4,14 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#07111f">
-  <title>Crawl Form Analyzer v1.4</title>
+  <title>Crawl Form Analyzer v1.5</title>
 
-  <!-- v1.4: v1.3の安定動作を維持 -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
 
   <style>
-    :root{--panel:#0d1b2a;--panel2:#10243a;--text:#f5f7fb;--muted:#9fb1c7;--ok:#38d39f;--bad:#ff667a}
+    :root{--panel:#0d1b2a;--panel2:#10243a;--text:#f5f7fb;--muted:#9fb1c7}
     *{box-sizing:border-box}
     body{margin:0;font-family:system-ui,-apple-system,"Segoe UI","Noto Sans JP",sans-serif;color:var(--text);background:linear-gradient(180deg,#07111f,#091827 55%,#07111f);min-height:100vh}
     .wrap{max-width:900px;margin:auto;padding:14px}
@@ -32,6 +31,7 @@
     .buttons{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:10px}
     button{appearance:none;border:none;border-radius:14px;padding:13px 11px;font-weight:800;font-size:15px;background:#1e88e5;color:#fff;min-height:48px}
     button.secondary{background:#24384d}button.record{background:#d6455d}button.stop{background:#7a3342}button:disabled{opacity:.42}
+    select{width:100%;background:#132840;color:#fff;border:1px solid #29445f;border-radius:12px;padding:12px;font-size:15px}
     .notice{padding:9px 11px;border-radius:12px;background:#182d43;color:#d9e7f5;font-size:13px;margin-top:10px}
     .graphWrap{height:240px;background:#081522;border-radius:14px;overflow:hidden}
     canvas#graph{width:100%;height:100%}
@@ -54,7 +54,17 @@
 <body>
 <div class="wrap">
   <h1>🏊 Crawl Form Analyzer</h1>
-  <div class="sub">v1.4 — 記録結果の自動集計を追加</div>
+  <div class="sub">v1.5 — 片腕単独解析・自動判定対応</div>
+
+  <section class="card">
+    <label for="modeSelect"><strong>解析モード</strong></label>
+    <select id="modeSelect">
+      <option value="auto">自動判定</option>
+      <option value="right">右腕のみ</option>
+      <option value="left">左腕のみ</option>
+    </select>
+    <div class="notice" id="modeHint">自動判定では、記録中により安定して見えている腕を優先します。</div>
+  </section>
 
   <section class="card">
     <div class="stage">
@@ -109,7 +119,7 @@
     </div>
 
     <div class="summary">
-      <div class="summaryTitle">左右差</div>
+      <div class="summaryTitle">解析結果</div>
       <div class="summaryText" id="summaryText">記録停止後に自動計算します。</div>
     </div>
   </section>
@@ -130,12 +140,13 @@
   const cameraBtn=$("cameraBtn"), flipBtn=$("flipBtn"), recordBtn=$("recordBtn"), stopBtn=$("stopBtn");
   const csvBtn=$("csvBtn"), clearBtn=$("clearBtn"), sampleCountEl=$("sampleCount");
   const graph=$("graph"), gctx=graph.getContext("2d");
-  const durationPill=$("durationPill"), summaryText=$("summaryText");
+  const durationPill=$("durationPill"), summaryText=$("summaryText"), modeSelect=$("modeSelect"), modeHint=$("modeHint");
   const rMin=$("rMin"),rMax=$("rMax"),rAvg=$("rAvg"),rRange=$("rRange");
   const lMin=$("lMin"),lMax=$("lMax"),lAvg=$("lAvg"),lRange=$("lRange");
 
   let pose=null, stream=null, facingMode="user", running=false, processing=false;
   let recording=false, recordStart=0, samples=[], rafId=null;
+  let rightValidCount=0,leftValidCount=0;
 
   function log(msg){
     diagEl.textContent += "\n[" + new Date().toLocaleTimeString() + "] " + msg;
@@ -150,6 +161,13 @@
     setStatus(stage+"でエラー\n"+(err?.message||String(err)||"不明なエラー"),"err");
     hint.textContent="赤いエラー表示と診断ログをスクリーンショットで送ってください。";
   }
+
+  modeSelect.onchange=()=>{
+    const v=modeSelect.value;
+    modeHint.textContent=v==="auto"?"自動判定では、記録中により安定して見えている腕を優先します。":
+      v==="right"?"右腕だけで解析します。左腕の未検出は無視します。":
+      "左腕だけで解析します。右腕の未検出は無視します。";
+  };
 
   addEventListener("error",e=>log("window error: "+(e.message||"unknown")));
   addEventListener("unhandledrejection",e=>log("unhandled rejection: "+(e.reason?.message||e.reason||"unknown")));
@@ -215,7 +233,7 @@
     }
 
     ctx.save();
-    if(facingMode==="user"){ ctx.translate(overlay.width,0); ctx.scale(-1,1); }
+    if(facingMode==="user"){ctx.translate(overlay.width,0);ctx.scale(-1,1)}
     drawConnectors(ctx,lm,POSE_CONNECTIONS,{color:"#46b5ff",lineWidth:4});
     drawLandmarks(ctx,lm,{color:"#ffffff",fillColor:"#38d39f",lineWidth:2,radius:4});
     ctx.restore();
@@ -232,11 +250,15 @@
     statusEl.textContent=recording?"● 記録中":"人体を追跡中";
     statusEl.className="status ok";
 
-    if(recording&&(r!=null||l!=null)){
-      samples.push({t:(performance.now()-recordStart)/1000,right:r,left:l});
-      sampleCountEl.textContent=samples.length+" サンプル";
-      durationPill.textContent=(samples[samples.length-1].t||0).toFixed(1)+" 秒";
-      if(samples.length%4===0)drawGraph();
+    if(recording){
+      if(r!=null)rightValidCount++;
+      if(l!=null)leftValidCount++;
+      if(r!=null||l!=null){
+        samples.push({t:(performance.now()-recordStart)/1000,right:r,left:l});
+        sampleCountEl.textContent=samples.length+" サンプル";
+        durationPill.textContent=(samples[samples.length-1].t||0).toFixed(1)+" 秒";
+        if(samples.length%4===0)drawGraph();
+      }
     }
   }
 
@@ -256,7 +278,6 @@
       return;
     }
     if(stream)stream.getTracks().forEach(t=>t.stop());
-
     try{
       setStatus("カメラ起動中…");
       stream=await navigator.mediaDevices.getUserMedia({
@@ -265,13 +286,11 @@
       });
       video.srcObject=stream;
       await video.play();
-
       running=true;
       flipBtn.disabled=false;
       recordBtn.disabled=false;
       cameraBtn.textContent="📷 カメラ再起動";
       setStatus("カメラ起動完了","ok");
-
       if(rafId)cancelAnimationFrame(rafId);
       predictionLoop();
     }catch(err){ fail("カメラ起動",err); }
@@ -288,26 +307,50 @@
 
   function renderStats(){
     const rs=statsFor("right"), ls=statsFor("left");
-    rMin.textContent=deg(rs?.min); rMax.textContent=deg(rs?.max); rAvg.textContent=deg(rs?.avg); rRange.textContent=deg(rs?.range);
-    lMin.textContent=deg(ls?.min); lMax.textContent=deg(ls?.max); lAvg.textContent=deg(ls?.avg); lRange.textContent=deg(ls?.range);
+    rMin.textContent=deg(rs?.min);rMax.textContent=deg(rs?.max);rAvg.textContent=deg(rs?.avg);rRange.textContent=deg(rs?.range);
+    lMin.textContent=deg(ls?.min);lMax.textContent=deg(ls?.max);lAvg.textContent=deg(ls?.avg);lRange.textContent=deg(ls?.range);
 
-    if(!rs || !ls){
-      summaryText.textContent="左右どちらかの検出データが不足しています。カメラ位置を調整して再記録してください。";
+    const mode=modeSelect.value;
+
+    if(mode==="right"){
+      if(!rs){summaryText.textContent="右腕の検出データが不足しています。";return}
+      summaryText.textContent=`右腕単独解析：最小 ${rs.min.toFixed(1)}°、最大 ${rs.max.toFixed(1)}°、平均 ${rs.avg.toFixed(1)}°、可動幅 ${rs.range.toFixed(1)}°。`;
       return;
     }
 
-    const avgDiff=Math.abs(rs.avg-ls.avg);
-    const rangeDiff=Math.abs(rs.range-ls.range);
-
-    let comment="左右の平均肘角度差は "+avgDiff.toFixed(1)+"°、可動幅差は "+rangeDiff.toFixed(1)+"° です。";
-    if(avgDiff<5 && rangeDiff<8){
-      comment+=" 左右差は小さめです。";
-    }else if(avgDiff<10 && rangeDiff<15){
-      comment+=" やや左右差があります。";
-    }else{
-      comment+=" 左右差が大きめなので、フォーム動画と合わせて確認すると良さそうです。";
+    if(mode==="left"){
+      if(!ls){summaryText.textContent="左腕の検出データが不足しています。";return}
+      summaryText.textContent=`左腕単独解析：最小 ${ls.min.toFixed(1)}°、最大 ${ls.max.toFixed(1)}°、平均 ${ls.avg.toFixed(1)}°、可動幅 ${ls.range.toFixed(1)}°。`;
+      return;
     }
-    summaryText.textContent=comment;
+
+    let dominant="判定不能";
+    if(rightValidCount>leftValidCount*1.15)dominant="右腕";
+    else if(leftValidCount>rightValidCount*1.15)dominant="左腕";
+    else if(rightValidCount||leftValidCount)dominant="両腕ほぼ同等";
+
+    if(dominant==="右腕" && rs){
+      summaryText.textContent=`自動判定：右腕を主解析対象としました。右腕の最小 ${rs.min.toFixed(1)}°、最大 ${rs.max.toFixed(1)}°、平均 ${rs.avg.toFixed(1)}°、可動幅 ${rs.range.toFixed(1)}°。`;
+      return;
+    }
+    if(dominant==="左腕" && ls){
+      summaryText.textContent=`自動判定：左腕を主解析対象としました。左腕の最小 ${ls.min.toFixed(1)}°、最大 ${ls.max.toFixed(1)}°、平均 ${ls.avg.toFixed(1)}°、可動幅 ${ls.range.toFixed(1)}°。`;
+      return;
+    }
+    if(rs&&ls){
+      const avgDiff=Math.abs(rs.avg-ls.avg),rangeDiff=Math.abs(rs.range-ls.range);
+      summaryText.textContent=`自動判定：両腕とも安定して検出されました。平均角度差 ${avgDiff.toFixed(1)}°、可動幅差 ${rangeDiff.toFixed(1)}°。`;
+      return;
+    }
+    if(rs){
+      summaryText.textContent=`自動判定：右腕のみ十分に検出されました。右腕の最小 ${rs.min.toFixed(1)}°、最大 ${rs.max.toFixed(1)}°、平均 ${rs.avg.toFixed(1)}°、可動幅 ${rs.range.toFixed(1)}°。`;
+      return;
+    }
+    if(ls){
+      summaryText.textContent=`自動判定：左腕のみ十分に検出されました。左腕の最小 ${ls.min.toFixed(1)}°、最大 ${ls.max.toFixed(1)}°、平均 ${ls.avg.toFixed(1)}°、可動幅 ${ls.range.toFixed(1)}°。`;
+      return;
+    }
+    summaryText.textContent="検出データが不足しています。カメラ位置を調整して再記録してください。";
   }
 
   function resetStats(){
@@ -315,10 +358,10 @@
     lMin.textContent=lMax.textContent=lAvg.textContent=lRange.textContent="--°";
     summaryText.textContent="記録停止後に自動計算します。";
     durationPill.textContent="0.0 秒";
+    rightValidCount=0;leftValidCount=0;
   }
 
   cameraBtn.onclick=startCamera;
-
   flipBtn.onclick=async()=>{
     facingMode=facingMode==="user"?"environment":"user";
     video.style.transform=facingMode==="user"?"scaleX(-1)":"none";
@@ -326,33 +369,18 @@
   };
 
   recordBtn.onclick=()=>{
-    samples=[];
-    recording=true;
-    recordStart=performance.now();
-    recordBtn.disabled=true;
-    stopBtn.disabled=false;
-    csvBtn.disabled=true;
-    sampleCountEl.textContent="0 サンプル";
-    resetStats();
-    drawGraph();
+    samples=[];recording=true;recordStart=performance.now();
+    recordBtn.disabled=true;stopBtn.disabled=false;csvBtn.disabled=true;
+    sampleCountEl.textContent="0 サンプル";resetStats();drawGraph();
   };
 
   stopBtn.onclick=()=>{
-    recording=false;
-    recordBtn.disabled=false;
-    stopBtn.disabled=true;
-    csvBtn.disabled=samples.length===0;
-    setStatus("記録終了","ok");
-    renderStats();
-    drawGraph();
+    recording=false;recordBtn.disabled=false;stopBtn.disabled=true;
+    csvBtn.disabled=samples.length===0;setStatus("記録終了","ok");renderStats();drawGraph();
   };
 
   clearBtn.onclick=()=>{
-    samples=[];
-    sampleCountEl.textContent="0 サンプル";
-    csvBtn.disabled=true;
-    resetStats();
-    drawGraph();
+    samples=[];sampleCountEl.textContent="0 サンプル";csvBtn.disabled=true;resetStats();drawGraph();
   };
 
   csvBtn.onclick=()=>{
@@ -367,6 +395,9 @@
       ].join(",")),
       "",
       "summary,value",
+      "mode,"+modeSelect.value,
+      "right_valid_count,"+rightValidCount,
+      "left_valid_count,"+leftValidCount,
       "duration_s,"+(samples[samples.length-1]?.t||0).toFixed(3),
       "right_min_deg,"+(rs?.min?.toFixed(2)??""),
       "right_max_deg,"+(rs?.max?.toFixed(2)??""),
@@ -390,25 +421,16 @@
     graph.width=Math.max(1,Math.round(rect.width*dpr));
     graph.height=Math.max(1,Math.round(rect.height*dpr));
     gctx.setTransform(dpr,0,0,dpr,0,0);
-
     const w=rect.width,h=rect.height,p={l:42,r:12,t:12,b:28},iw=w-p.l-p.r,ih=h-p.t-p.b;
-    gctx.clearRect(0,0,w,h);
-    gctx.fillStyle="#081522";gctx.fillRect(0,0,w,h);
+    gctx.clearRect(0,0,w,h);gctx.fillStyle="#081522";gctx.fillRect(0,0,w,h);
     gctx.strokeStyle="#27415b";gctx.fillStyle="#8ea4bc";gctx.font="11px system-ui";
-
     [0,45,90,135,180].forEach(v=>{
-      const y=p.t+ih*(1-v/180);
-      gctx.beginPath();gctx.moveTo(p.l,y);gctx.lineTo(w-p.r,y);gctx.stroke();
-      gctx.fillText(v+"°",5,y+4);
+      const y=p.t+ih*(1-v/180);gctx.beginPath();gctx.moveTo(p.l,y);gctx.lineTo(w-p.r,y);gctx.stroke();gctx.fillText(v+"°",5,y+4);
     });
-
     if(!samples.length){
       gctx.fillStyle="#7890aa";gctx.font="14px system-ui";gctx.textAlign="center";
-      gctx.fillText("記録するとここに角度変化が表示されます",w/2,h/2);
-      gctx.textAlign="start";
-      return;
+      gctx.fillText("記録するとここに角度変化が表示されます",w/2,h/2);gctx.textAlign="start";return;
     }
-
     const tmax=Math.max(.1,samples[samples.length-1].t);
     const plot=(key,color)=>{
       gctx.strokeStyle=color;gctx.lineWidth=2;gctx.beginPath();let started=false;
@@ -419,8 +441,7 @@
       }
       gctx.stroke();
     };
-    plot("right","#46b5ff");
-    plot("left","#38d39f");
+    plot("right","#46b5ff");plot("left","#38d39f");
   }
 
   addEventListener("resize",drawGraph);
