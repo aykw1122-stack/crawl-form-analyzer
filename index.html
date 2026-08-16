@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#07111f">
-  <title>Crawl Form Analyzer v1.3</title>
+  <title>Crawl Form Analyzer v1.4</title>
 
-  <!-- v1.3: MediaPipe Tasks Visionをやめ、classic script版Poseを使用 -->
+  <!-- v1.4: v1.3の安定動作を維持 -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
 
@@ -40,12 +40,21 @@
     .legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:12px;margin-top:8px}
     .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}.dot.r{background:#46b5ff}.dot.l{background:#38d39f}
     .diag{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#c6d4e3;white-space:pre-wrap;word-break:break-word;background:#071522;border-radius:12px;padding:10px;max-height:190px;overflow:auto}
+    .stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+    .statsBox{background:#0a1826;border-radius:14px;padding:12px}
+    .statsBox h3{margin:0 0 8px;font-size:16px}
+    .statline{display:flex;justify-content:space-between;gap:10px;padding:5px 0;border-bottom:1px solid #1a3047;font-size:13px}
+    .statline:last-child{border-bottom:none}
+    .statline b{font-size:15px}
+    .summary{margin-top:10px;background:#132840;border-radius:14px;padding:12px}
+    .summaryTitle{font-weight:800;margin-bottom:6px}
+    .summaryText{color:#d7e4f2;font-size:13px;line-height:1.6}
   </style>
 </head>
 <body>
 <div class="wrap">
   <h1>🏊 Crawl Form Analyzer</h1>
-  <div class="sub">v1.3 — MediaPipe Pose classic script版</div>
+  <div class="sub">v1.4 — 記録結果の自動集計を追加</div>
 
   <section class="card">
     <div class="stage">
@@ -77,6 +86,35 @@
   </section>
 
   <section class="card">
+    <div class="row">
+      <strong>記録結果</strong>
+      <span class="pill" id="durationPill">0.0 秒</span>
+    </div>
+
+    <div class="stats">
+      <div class="statsBox">
+        <h3>右ひじ</h3>
+        <div class="statline"><span>最小</span><b id="rMin">--°</b></div>
+        <div class="statline"><span>最大</span><b id="rMax">--°</b></div>
+        <div class="statline"><span>平均</span><b id="rAvg">--°</b></div>
+        <div class="statline"><span>可動幅</span><b id="rRange">--°</b></div>
+      </div>
+      <div class="statsBox">
+        <h3>左ひじ</h3>
+        <div class="statline"><span>最小</span><b id="lMin">--°</b></div>
+        <div class="statline"><span>最大</span><b id="lMax">--°</b></div>
+        <div class="statline"><span>平均</span><b id="lAvg">--°</b></div>
+        <div class="statline"><span>可動幅</span><b id="lRange">--°</b></div>
+      </div>
+    </div>
+
+    <div class="summary">
+      <div class="summaryTitle">左右差</div>
+      <div class="summaryText" id="summaryText">記録停止後に自動計算します。</div>
+    </div>
+  </section>
+
+  <section class="card">
     <strong>診断ログ</strong>
     <div id="diag" class="diag">ページ読み込み完了</div>
   </section>
@@ -92,9 +130,12 @@
   const cameraBtn=$("cameraBtn"), flipBtn=$("flipBtn"), recordBtn=$("recordBtn"), stopBtn=$("stopBtn");
   const csvBtn=$("csvBtn"), clearBtn=$("clearBtn"), sampleCountEl=$("sampleCount");
   const graph=$("graph"), gctx=graph.getContext("2d");
+  const durationPill=$("durationPill"), summaryText=$("summaryText");
+  const rMin=$("rMin"),rMax=$("rMax"),rAvg=$("rAvg"),rRange=$("rRange");
+  const lMin=$("lMin"),lMax=$("lMax"),lAvg=$("lAvg"),lRange=$("lRange");
 
   let pose=null, stream=null, facingMode="user", running=false, processing=false;
-  let recording=false, recordStart=0, samples=[], rafId=null, latestLandmarks=null;
+  let recording=false, recordStart=0, samples=[], rafId=null;
 
   function log(msg){
     diagEl.textContent += "\n[" + new Date().toLocaleTimeString() + "] " + msg;
@@ -115,20 +156,12 @@
 
   try{
     setStatus("1/3 MediaPipe Poseライブラリ確認中…");
-
-    if(typeof Pose==="undefined"){
-      throw new Error("Pose が見つかりません。pose.js の読み込みに失敗しています。");
-    }
-    if(typeof drawConnectors==="undefined" || typeof drawLandmarks==="undefined"){
-      throw new Error("drawing_utils.js の読み込みに失敗しています。");
-    }
+    if(typeof Pose==="undefined") throw new Error("Pose が見つかりません。pose.js の読み込みに失敗しています。");
+    if(typeof drawConnectors==="undefined" || typeof drawLandmarks==="undefined") throw new Error("drawing_utils.js の読み込みに失敗しています。");
     log("Pose / drawing_utils 読み込み OK");
 
     setStatus("2/3 Poseエンジン初期化中…");
-    pose=new Pose({
-      locateFile:(file)=>`https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
-    });
-
+    pose=new Pose({ locateFile:(file)=>`https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}` });
     pose.setOptions({
       modelComplexity:1,
       smoothLandmarks:true,
@@ -138,7 +171,6 @@
       minTrackingConfidence:0.5,
       selfieMode:false
     });
-
     pose.onResults(onResults);
 
     setStatus("3/3 AI準備完了","ok");
@@ -155,9 +187,7 @@
     return Math.acos(Math.max(-1,Math.min(1,dot/mag)))*180/Math.PI;
   }
 
-  function visibilityOk(...pts){
-    return pts.every(p=>p && (p.visibility??1)>.55);
-  }
+  function visibilityOk(...pts){ return pts.every(p=>p && (p.visibility??1)>.55); }
   function qualityText(ok,pts){
     if(!ok)return "検出が不安定";
     const q=Math.min(...pts.map(p=>p.visibility??1));
@@ -176,8 +206,6 @@
     ctx.clearRect(0,0,overlay.width,overlay.height);
 
     const lm=results.poseLandmarks;
-    latestLandmarks=lm||null;
-
     if(!lm){
       rightAngleEl.textContent=leftAngleEl.textContent="--°";
       rightQualityEl.textContent=leftQualityEl.textContent="未検出";
@@ -187,10 +215,7 @@
     }
 
     ctx.save();
-    if(facingMode==="user"){
-      ctx.translate(overlay.width,0);
-      ctx.scale(-1,1);
-    }
+    if(facingMode==="user"){ ctx.translate(overlay.width,0); ctx.scale(-1,1); }
     drawConnectors(ctx,lm,POSE_CONNECTIONS,{color:"#46b5ff",lineWidth:4});
     drawLandmarks(ctx,lm,{color:"#ffffff",fillColor:"#38d39f",lineWidth:2,radius:4});
     ctx.restore();
@@ -210,6 +235,7 @@
     if(recording&&(r!=null||l!=null)){
       samples.push({t:(performance.now()-recordStart)/1000,right:r,left:l});
       sampleCountEl.textContent=samples.length+" サンプル";
+      durationPill.textContent=(samples[samples.length-1].t||0).toFixed(1)+" 秒";
       if(samples.length%4===0)drawGraph();
     }
   }
@@ -218,14 +244,8 @@
     if(!running)return;
     if(video.readyState>=2 && !processing && pose){
       processing=true;
-      try{
-        await pose.send({image:video});
-      }catch(err){
-        processing=false;
-        fail("姿勢推定",err);
-        running=false;
-        return;
-      }
+      try{ await pose.send({image:video}); }
+      catch(err){ processing=false; fail("姿勢推定",err); running=false; return; }
     }
     rafId=requestAnimationFrame(predictionLoop);
   }
@@ -241,12 +261,7 @@
       setStatus("カメラ起動中…");
       stream=await navigator.mediaDevices.getUserMedia({
         audio:false,
-        video:{
-          facingMode:{ideal:facingMode},
-          width:{ideal:1280},
-          height:{ideal:720},
-          frameRate:{ideal:30,max:60}
-        }
+        video:{facingMode:{ideal:facingMode},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30,max:60}}
       });
       video.srcObject=stream;
       await video.play();
@@ -259,9 +274,47 @@
 
       if(rafId)cancelAnimationFrame(rafId);
       predictionLoop();
-    }catch(err){
-      fail("カメラ起動",err);
+    }catch(err){ fail("カメラ起動",err); }
+  }
+
+  function mean(arr){ return arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : null; }
+  function statsFor(key){
+    const vals=samples.map(s=>s[key]).filter(v=>Number.isFinite(v));
+    if(!vals.length)return null;
+    const min=Math.min(...vals),max=Math.max(...vals),avg=mean(vals);
+    return {min,max,avg,range:max-min,count:vals.length};
+  }
+  function deg(v){ return v==null?"--°":Math.round(v)+"°"; }
+
+  function renderStats(){
+    const rs=statsFor("right"), ls=statsFor("left");
+    rMin.textContent=deg(rs?.min); rMax.textContent=deg(rs?.max); rAvg.textContent=deg(rs?.avg); rRange.textContent=deg(rs?.range);
+    lMin.textContent=deg(ls?.min); lMax.textContent=deg(ls?.max); lAvg.textContent=deg(ls?.avg); lRange.textContent=deg(ls?.range);
+
+    if(!rs || !ls){
+      summaryText.textContent="左右どちらかの検出データが不足しています。カメラ位置を調整して再記録してください。";
+      return;
     }
+
+    const avgDiff=Math.abs(rs.avg-ls.avg);
+    const rangeDiff=Math.abs(rs.range-ls.range);
+
+    let comment="左右の平均肘角度差は "+avgDiff.toFixed(1)+"°、可動幅差は "+rangeDiff.toFixed(1)+"° です。";
+    if(avgDiff<5 && rangeDiff<8){
+      comment+=" 左右差は小さめです。";
+    }else if(avgDiff<10 && rangeDiff<15){
+      comment+=" やや左右差があります。";
+    }else{
+      comment+=" 左右差が大きめなので、フォーム動画と合わせて確認すると良さそうです。";
+    }
+    summaryText.textContent=comment;
+  }
+
+  function resetStats(){
+    rMin.textContent=rMax.textContent=rAvg.textContent=rRange.textContent="--°";
+    lMin.textContent=lMax.textContent=lAvg.textContent=lRange.textContent="--°";
+    summaryText.textContent="記録停止後に自動計算します。";
+    durationPill.textContent="0.0 秒";
   }
 
   cameraBtn.onclick=startCamera;
@@ -280,6 +333,7 @@
     stopBtn.disabled=false;
     csvBtn.disabled=true;
     sampleCountEl.textContent="0 サンプル";
+    resetStats();
     drawGraph();
   };
 
@@ -289,6 +343,7 @@
     stopBtn.disabled=true;
     csvBtn.disabled=samples.length===0;
     setStatus("記録終了","ok");
+    renderStats();
     drawGraph();
   };
 
@@ -296,18 +351,31 @@
     samples=[];
     sampleCountEl.textContent="0 サンプル";
     csvBtn.disabled=true;
+    resetStats();
     drawGraph();
   };
 
   csvBtn.onclick=()=>{
     if(!samples.length)return;
+    const rs=statsFor("right"),ls=statsFor("left");
     const rows=[
       "time_s,right_elbow_deg,left_elbow_deg",
       ...samples.map(s=>[
         s.t.toFixed(3),
         s.right==null?"":s.right.toFixed(2),
         s.left==null?"":s.left.toFixed(2)
-      ].join(","))
+      ].join(",")),
+      "",
+      "summary,value",
+      "duration_s,"+(samples[samples.length-1]?.t||0).toFixed(3),
+      "right_min_deg,"+(rs?.min?.toFixed(2)??""),
+      "right_max_deg,"+(rs?.max?.toFixed(2)??""),
+      "right_avg_deg,"+(rs?.avg?.toFixed(2)??""),
+      "right_range_deg,"+(rs?.range?.toFixed(2)??""),
+      "left_min_deg,"+(ls?.min?.toFixed(2)??""),
+      "left_max_deg,"+(ls?.max?.toFixed(2)??""),
+      "left_avg_deg,"+(ls?.avg?.toFixed(2)??""),
+      "left_range_deg,"+(ls?.range?.toFixed(2)??"")
     ];
     const blob=new Blob([rows.join("\n")],{type:"text/csv;charset=utf-8"});
     const a=document.createElement("a");
@@ -335,9 +403,7 @@
     });
 
     if(!samples.length){
-      gctx.fillStyle="#7890aa";
-      gctx.font="14px system-ui";
-      gctx.textAlign="center";
+      gctx.fillStyle="#7890aa";gctx.font="14px system-ui";gctx.textAlign="center";
       gctx.fillText("記録するとここに角度変化が表示されます",w/2,h/2);
       gctx.textAlign="start";
       return;
@@ -345,13 +411,9 @@
 
     const tmax=Math.max(.1,samples[samples.length-1].t);
     const plot=(key,color)=>{
-      gctx.strokeStyle=color;
-      gctx.lineWidth=2;
-      gctx.beginPath();
-      let started=false;
+      gctx.strokeStyle=color;gctx.lineWidth=2;gctx.beginPath();let started=false;
       for(const s of samples){
-        const v=s[key];
-        if(v==null)continue;
+        const v=s[key];if(v==null)continue;
         const x=p.l+iw*(s.t/tmax),y=p.t+ih*(1-v/180);
         if(!started){gctx.moveTo(x,y);started=true}else gctx.lineTo(x,y);
       }
@@ -362,6 +424,7 @@
   }
 
   addEventListener("resize",drawGraph);
+  resetStats();
   drawGraph();
 })();
 </script>
