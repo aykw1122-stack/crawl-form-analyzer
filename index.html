@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#07111f" />
+  <title>Crawl Form Analyzer v1</title>
+  <style>
+    :root{
+      --bg:#07111f; --panel:#0d1b2a; --panel2:#10243a; --text:#f5f7fb;
+      --muted:#9fb1c7; --ok:#38d39f; --warn:#ffca5c; --bad:#ff667a; --line:#46b5ff;
+      --radius:18px;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0; font-family:system-ui,-apple-system,"Segoe UI","Noto Sans JP",sans-serif;
+      color:var(--text); background:linear-gradient(180deg,#07111f,#091827 55%,#07111f);
+      min-height:100vh;
+    }
+    .wrap{max-width:900px;margin:auto;padding:14px}
+    h1{font-size:clamp(22px,5vw,34px);margin:6px 0 4px}
+    .sub{color:var(--muted);font-size:14px;margin-bottom:12px}
+    .card{background:rgba(13,27,42,.94);border:1px solid #20354d;border-radius:var(--radius);padding:12px;margin:10px 0;box-shadow:0 12px 30px #0005}
+    .stage{position:relative;overflow:hidden;border-radius:14px;background:#000;aspect-ratio:3/4;max-height:68vh}
+    video,canvas.overlay{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+    video{transform:scaleX(-1)}
+    canvas.overlay{pointer-events:none}
+    .status{
+      position:absolute;top:10px;left:10px;padding:7px 10px;border-radius:999px;
+      background:#000a;font-size:13px;backdrop-filter:blur(8px)
+    }
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+    .metric{background:var(--panel2);border-radius:14px;padding:12px;text-align:center}
+    .metric .label{color:var(--muted);font-size:13px}
+    .metric .value{font-size:31px;font-weight:800;line-height:1.15;margin-top:4px}
+    .metric .quality{font-size:12px;margin-top:5px;color:var(--muted)}
+    .buttons{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:10px}
+    button{
+      appearance:none;border:none;border-radius:14px;padding:13px 11px;font-weight:800;font-size:15px;
+      background:#1e88e5;color:white;min-height:48px
+    }
+    button.secondary{background:#24384d}
+    button.record{background:#d6455d}
+    button.stop{background:#7a3342}
+    button:disabled{opacity:.42}
+    .tiny{font-size:12px;color:var(--muted);line-height:1.55}
+    .graphWrap{height:240px;background:#081522;border-radius:14px;overflow:hidden}
+    canvas#graph{width:100%;height:100%}
+    .row{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}
+    .pill{background:#142a42;padding:6px 10px;border-radius:999px;color:#cfe9ff;font-size:12px}
+    .legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:12px;margin-top:8px}
+    .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}
+    .dot.r{background:#46b5ff}.dot.l{background:#38d39f}
+    .notice{padding:9px 11px;border-radius:12px;background:#182d43;color:#d9e7f5;font-size:13px;margin-top:10px}
+    .hidden{display:none}
+    @media(min-width:720px){
+      .stage{aspect-ratio:16/10}
+      .buttons{grid-template-columns:repeat(4,1fr)}
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🏊 Crawl Form Analyzer</h1>
+  <div class="sub">第1号機 — スマホ1台で肩・肘・手首を追跡し、左右の肘角度をリアルタイム表示</div>
+
+  <section class="card">
+    <div class="stage" id="stage">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="overlay" class="overlay"></canvas>
+      <div class="status" id="status">AI準備中…</div>
+    </div>
+
+    <div class="grid">
+      <div class="metric">
+        <div class="label">右ひじ</div>
+        <div class="value" id="rightAngle">--°</div>
+        <div class="quality" id="rightQuality">未検出</div>
+      </div>
+      <div class="metric">
+        <div class="label">左ひじ</div>
+        <div class="value" id="leftAngle">--°</div>
+        <div class="quality" id="leftQuality">未検出</div>
+      </div>
+    </div>
+
+    <div class="buttons">
+      <button id="cameraBtn">📷 カメラ開始</button>
+      <button id="flipBtn" class="secondary" disabled>🔄 カメラ切替</button>
+      <button id="recordBtn" class="record" disabled>● 記録開始</button>
+      <button id="stopBtn" class="stop" disabled>■ 記録停止</button>
+    </div>
+
+    <div class="notice" id="hint">
+      最初はスマホを2〜3m離し、頭から指先まで画面内に入れてください。横向き・正面の両方を試せます。
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="row">
+      <strong>肘角度の記録</strong>
+      <span class="pill" id="sampleCount">0 サンプル</span>
+    </div>
+    <div class="graphWrap"><canvas id="graph"></canvas></div>
+    <div class="legend">
+      <span><i class="dot r"></i>右肘</span>
+      <span><i class="dot l"></i>左肘</span>
+    </div>
+    <div class="buttons">
+      <button id="csvBtn" class="secondary" disabled>CSV保存</button>
+      <button id="clearBtn" class="secondary">記録クリア</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <strong>使い方</strong>
+    <div class="tiny">
+      1. 「カメラ開始」を押してカメラを許可します。<br>
+      2. 全身と伸ばした腕が画面から切れない位置に立ちます。<br>
+      3. 「記録開始」を押して、ゆっくりクロール動作を10回ほど行います。<br>
+      4. 「記録停止」でグラフを確認します。CSV保存もできます。<br><br>
+      ※ この第1号機は「関節の見える角度」を測る試作版です。水泳の正しいフォームを自動診断する医療・競技判定機器ではありません。<br>
+      ※ ライブカメラはブラウザの仕様上、HTTPSで開く必要があります。
+    </div>
+  </section>
+</div>
+
+<script type="module">
+import {
+  PoseLandmarker,
+  FilesetResolver,
+  DrawingUtils
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/+esm";
+
+const MODEL_URL =
+  "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task";
+const WASM_URL =
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm";
+
+const video = document.getElementById("video");
+const overlay = document.getElementById("overlay");
+const ctx = overlay.getContext("2d");
+const statusEl = document.getElementById("status");
+const rightAngleEl = document.getElementById("rightAngle");
+const leftAngleEl = document.getElementById("leftAngle");
+const rightQualityEl = document.getElementById("rightQuality");
+const leftQualityEl = document.getElementById("leftQuality");
+const cameraBtn = document.getElementById("cameraBtn");
+const flipBtn = document.getElementById("flipBtn");
+const recordBtn = document.getElementById("recordBtn");
+const stopBtn = document.getElementById("stopBtn");
+const csvBtn = document.getElementById("csvBtn");
+const clearBtn = document.getElementById("clearBtn");
+const sampleCountEl = document.getElementById("sampleCount");
+const graph = document.getElementById("graph");
+const gctx = graph.getContext("2d");
+const hint = document.getElementById("hint");
+
+let poseLandmarker;
+let running = false;
+let stream = null;
+let facingMode = "user";
+let lastVideoTime = -1;
+let recording = false;
+let recordStart = 0;
+let samples = [];
+let rafId = null;
+
+function setStatus(text){ statusEl.textContent = text; }
+
+async function initAI(){
+  try{
+    setStatus("AIモデル読込中…");
+    const vision = await FilesetResolver.forVisionTasks(WASM_URL);
+    poseLandmarker = await PoseLandmarker.createFromOptions(vision,{
+      baseOptions:{ modelAssetPath:MODEL_URL, delegate:"GPU" },
+      runningMode:"VIDEO",
+      numPoses:1,
+      minPoseDetectionConfidence:0.5,
+      minPosePresenceConfidence:0.5,
+      minTrackingConfidence:0.5
+    });
+    setStatus("AI準備完了");
+  }catch(e){
+    console.error(e);
+    setStatus("AI読込エラー");
+    hint.textContent = "AIモデルを読み込めませんでした。インターネット接続を確認して再読み込みしてください。";
+  }
+}
+
+function angle3(a,b,c){
+  const bax=a.x-b.x, bay=a.y-b.y;
+  const bcx=c.x-b.x, bcy=c.y-b.y;
+  const dot=bax*bcx+bay*bcy;
+  const mag=Math.hypot(bax,bay)*Math.hypot(bcx,bcy);
+  if(!mag) return null;
+  const cos=Math.min(1,Math.max(-1,dot/mag));
+  return Math.acos(cos)*180/Math.PI;
+}
+
+function visibilityOk(...pts){
+  return pts.every(p => p && (p.visibility ?? 1) > 0.55);
+}
+
+function qualityText(ok, pts){
+  if(!ok) return "検出が不安定";
+  const q = Math.min(...pts.map(p => p.visibility ?? 1));
+  if(q > .85) return "追跡 良好";
+  if(q > .65) return "追跡 普通";
+  return "追跡 弱め";
+}
+
+function resizeCanvasToVideo(){
+  if(!video.videoWidth || !video.videoHeight) return;
+  if(overlay.width !== video.videoWidth || overlay.height !== video.videoHeight){
+    overlay.width = video.videoWidth;
+    overlay.height = video.videoHeight;
+  }
+}
+
+function drawPose(landmarks){
+  ctx.clearRect(0,0,overlay.width,overlay.height);
+  if(!landmarks) return;
+  const d = new DrawingUtils(ctx);
+  ctx.save();
+  // Video is mirrored for the user-facing camera, so mirror overlay too.
+  if(facingMode === "user"){
+    ctx.translate(overlay.width,0);
+    ctx.scale(-1,1);
+  }
+  d.drawConnectors(landmarks, PoseLandmarker.POSE_CONNECTIONS, {color:"#46b5ff", lineWidth:4});
+  d.drawLandmarks(landmarks, {color:"#ffffff", fillColor:"#38d39f", radius:4});
+  ctx.restore();
+}
+
+function updateAngles(lm){
+  // MediaPipe pose indices:
+  // L shoulder 11, R shoulder 12, L elbow 13, R elbow 14, L wrist 15, R wrist 16
+  const ls=lm[11], rs=lm[12], le=lm[13], re=lm[14], lw=lm[15], rw=lm[16];
+
+  const rOk=visibilityOk(rs,re,rw);
+  const lOk=visibilityOk(ls,le,lw);
+  const r=rOk ? angle3(rs,re,rw) : null;
+  const l=lOk ? angle3(ls,le,lw) : null;
+
+  rightAngleEl.textContent = r==null ? "--°" : `${Math.round(r)}°`;
+  leftAngleEl.textContent  = l==null ? "--°" : `${Math.round(l)}°`;
+  rightQualityEl.textContent = qualityText(rOk,[rs,re,rw]);
+  leftQualityEl.textContent  = qualityText(lOk,[ls,le,lw]);
+
+  if(recording && (r!=null || l!=null)){
+    const t=(performance.now()-recordStart)/1000;
+    samples.push({t, right:r, left:l});
+    sampleCountEl.textContent=`${samples.length} サンプル`;
+    if(samples.length % 4 === 0) drawGraph();
+  }
+}
+
+async function predictLoop(){
+  if(!running) return;
+  resizeCanvasToVideo();
+
+  if(poseLandmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime){
+    lastVideoTime=video.currentTime;
+    const ts=performance.now();
+    poseLandmarker.detectForVideo(video, ts, result=>{
+      const lm=result.landmarks?.[0];
+      drawPose(lm);
+      if(lm){
+        updateAngles(lm);
+        setStatus(recording ? "● 記録中" : "人体を追跡中");
+      }else{
+        rightAngleEl.textContent=leftAngleEl.textContent="--°";
+        rightQualityEl.textContent=leftQualityEl.textContent="未検出";
+        setStatus("全身を画面に入れてください");
+      }
+    });
+  }
+  rafId=requestAnimationFrame(predictLoop);
+}
+
+async function startCamera(){
+  if(!navigator.mediaDevices?.getUserMedia){
+    alert("このブラウザではカメラを利用できません。HTTPSで開いているか確認してください。");
+    return;
+  }
+  if(stream) stream.getTracks().forEach(t=>t.stop());
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio:false,
+      video:{
+        facingMode:{ideal:facingMode},
+        width:{ideal:1280},
+        height:{ideal:720},
+        frameRate:{ideal:30,max:60}
+      }
+    });
+    video.srcObject=stream;
+    await video.play();
+    running=true;
+    flipBtn.disabled=false;
+    recordBtn.disabled=false;
+    cameraBtn.textContent="📷 カメラ再起動";
+    if(rafId) cancelAnimationFrame(rafId);
+    predictLoop();
+  }catch(e){
+    console.error(e);
+    alert("カメラを開始できませんでした。ブラウザのカメラ権限とHTTPS接続を確認してください。");
+  }
+}
+
+cameraBtn.addEventListener("click", startCamera);
+
+flipBtn.addEventListener("click", async()=>{
+  facingMode = facingMode === "user" ? "environment" : "user";
+  video.style.transform = facingMode === "user" ? "scaleX(-1)" : "none";
+  await startCamera();
+});
+
+recordBtn.addEventListener("click", ()=>{
+  samples=[];
+  recording=true;
+  recordStart=performance.now();
+  recordBtn.disabled=true;
+  stopBtn.disabled=false;
+  csvBtn.disabled=true;
+  sampleCountEl.textContent="0 サンプル";
+  drawGraph();
+});
+
+stopBtn.addEventListener("click", ()=>{
+  recording=false;
+  recordBtn.disabled=false;
+  stopBtn.disabled=true;
+  csvBtn.disabled=samples.length===0;
+  setStatus("記録終了");
+  drawGraph();
+});
+
+clearBtn.addEventListener("click", ()=>{
+  samples=[];
+  sampleCountEl.textContent="0 サンプル";
+  csvBtn.disabled=true;
+  drawGraph();
+});
+
+csvBtn.addEventListener("click", ()=>{
+  if(!samples.length) return;
+  const rows=["time_s,right_elbow_deg,left_elbow_deg"];
+  for(const s of samples){
+    rows.push([
+      s.t.toFixed(3),
+      s.right==null ? "" : s.right.toFixed(2),
+      s.left==null ? "" : s.left.toFixed(2)
+    ].join(","));
+  }
+  const blob=new Blob([rows.join("\n")],{type:"text/csv;charset=utf-8"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download=`crawl_form_${new Date().toISOString().replace(/[:.]/g,"-")}.csv`;
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+});
+
+function drawGraph(){
+  const rect=graph.getBoundingClientRect();
+  const dpr=window.devicePixelRatio||1;
+  graph.width=Math.max(1,Math.round(rect.width*dpr));
+  graph.height=Math.max(1,Math.round(rect.height*dpr));
+  gctx.setTransform(dpr,0,0,dpr,0,0);
+  const w=rect.width,h=rect.height;
+  gctx.clearRect(0,0,w,h);
+  gctx.fillStyle="#081522"; gctx.fillRect(0,0,w,h);
+
+  const pad={l:42,r:12,t:12,b:28};
+  const iw=w-pad.l-pad.r, ih=h-pad.t-pad.b;
+  gctx.strokeStyle="#27415b"; gctx.lineWidth=1;
+  gctx.fillStyle="#8ea4bc"; gctx.font="11px system-ui";
+  [0,45,90,135,180].forEach(v=>{
+    const y=pad.t+ih*(1-v/180);
+    gctx.beginPath();gctx.moveTo(pad.l,y);gctx.lineTo(w-pad.r,y);gctx.stroke();
+    gctx.fillText(`${v}°`,5,y+4);
+  });
+
+  if(!samples.length){
+    gctx.fillStyle="#7890aa";
+    gctx.font="14px system-ui";
+    gctx.textAlign="center";
+    gctx.fillText("記録するとここに角度変化が表示されます",w/2,h/2);
+    gctx.textAlign="start";
+    return;
+  }
+  const tmax=Math.max(.1,samples[samples.length-1].t);
+  const plot=(key,color)=>{
+    gctx.strokeStyle=color;gctx.lineWidth=2;gctx.beginPath();
+    let started=false;
+    for(const s of samples){
+      const v=s[key]; if(v==null) continue;
+      const x=pad.l+iw*(s.t/tmax);
+      const y=pad.t+ih*(1-v/180);
+      if(!started){gctx.moveTo(x,y);started=true}else gctx.lineTo(x,y);
+    }
+    gctx.stroke();
+  };
+  plot("right","#46b5ff");
+  plot("left","#38d39f");
+  gctx.fillStyle="#8ea4bc";
+  gctx.fillText("0s",pad.l,h-8);
+  const label=`${tmax.toFixed(1)}s`;
+  gctx.fillText(label,w-pad.r-gctx.measureText(label).width,h-8);
+}
+
+window.addEventListener("resize",drawGraph);
+drawGraph();
+initAI();
+</script>
+</body>
+</html>
