@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#07111f">
-  <title>Crawl Form Analyzer v1.5</title>
+  <title>Crawl Form Analyzer v1.7</title>
 
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
@@ -49,12 +49,26 @@
     .summary{margin-top:10px;background:#132840;border-radius:14px;padding:12px}
     .summaryTitle{font-weight:800;margin-bottom:6px}
     .summaryText{color:#d7e4f2;font-size:13px;line-height:1.6}
+  
+    .scoreHero{display:grid;grid-template-columns:120px 1fr;gap:14px;align-items:center;margin-top:10px}
+    .scoreCircle{width:110px;height:110px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-direction:column;background:#0a1826;border:8px solid #29445f}
+    .scoreCircle .num{font-size:38px;font-weight:900;line-height:1}
+    .scoreCircle .unit{font-size:12px;color:var(--muted);margin-top:4px}
+    .scoreRows{display:grid;gap:7px}
+    .scoreRow{display:grid;grid-template-columns:82px 1fr 42px;gap:8px;align-items:center;font-size:13px}
+    .bar{height:10px;background:#142a42;border-radius:999px;overflow:hidden}
+    .bar > span{display:block;height:100%;background:#38d39f;width:0%}
+    .advice{margin-top:10px;background:#132840;border-radius:14px;padding:12px}
+    .advice strong{display:block;margin-bottom:5px}
+    .advice p{margin:0;color:#d7e4f2;font-size:13px;line-height:1.6}
+    .experimental{font-size:12px;color:var(--muted);margin-top:8px;line-height:1.5}
+
   </style>
 </head>
 <body>
 <div class="wrap">
   <h1>🏊 Crawl Form Analyzer</h1>
-  <div class="sub">v1.5 — 片腕単独解析・自動判定対応</div>
+  <div class="sub">v1.7 — 理想フォーム採点（実験版）</div>
 
   <section class="card">
     <label for="modeSelect"><strong>解析モード</strong></label>
@@ -80,6 +94,7 @@
 
     <div class="buttons">
       <button id="cameraBtn" disabled>📷 カメラ開始</button>
+      <button id="cameraStopBtn" class="secondary" disabled>⏹ カメラ停止</button>
       <button id="flipBtn" class="secondary" disabled>🔄 カメラ切替</button>
       <button id="recordBtn" class="record" disabled>● 記録開始</button>
       <button id="stopBtn" class="stop" disabled>■ 記録停止</button>
@@ -124,6 +139,53 @@
     </div>
   </section>
 
+
+  <section class="card">
+    <div class="row">
+      <strong>理想フォーム採点（実験版）</strong>
+      <span class="pill" id="phaseCount">0 有効フレーム</span>
+    </div>
+
+    <div class="scoreHero">
+      <div class="scoreCircle">
+        <div class="num" id="totalScore">--</div>
+        <div class="unit">/ 100</div>
+      </div>
+
+      <div class="scoreRows">
+        <div class="scoreRow">
+          <span>キャッチ</span>
+          <div class="bar"><span id="catchBar"></span></div>
+          <b id="catchScore">--</b>
+        </div>
+        <div class="scoreRow">
+          <span>EVF</span>
+          <div class="bar"><span id="evfBar"></span></div>
+          <b id="evfScore">--</b>
+        </div>
+        <div class="scoreRow">
+          <span>肘落ち</span>
+          <div class="bar"><span id="elbowBar"></span></div>
+          <b id="elbowScore">--</b>
+        </div>
+        <div class="scoreRow">
+          <span>再現性</span>
+          <div class="bar"><span id="repeatBar"></span></div>
+          <b id="repeatScore">--</b>
+        </div>
+      </div>
+    </div>
+
+    <div class="advice">
+      <strong>今回の改善ポイント</strong>
+      <p id="adviceText">記録停止後に採点します。</p>
+    </div>
+
+    <div class="experimental">
+      ※ スマホ1台の2D映像から推定する練習用スコアです。競技上の絶対的な正解を判定するものではありません。
+    </div>
+  </section>
+
   <section class="card">
     <strong>診断ログ</strong>
     <div id="diag" class="diag">ページ読み込み完了</div>
@@ -137,7 +199,7 @@
   const statusEl=$("status"), diagEl=$("diag"), hint=$("hint");
   const rightAngleEl=$("rightAngle"), leftAngleEl=$("leftAngle");
   const rightQualityEl=$("rightQuality"), leftQualityEl=$("leftQuality");
-  const cameraBtn=$("cameraBtn"), flipBtn=$("flipBtn"), recordBtn=$("recordBtn"), stopBtn=$("stopBtn");
+  const cameraBtn=$("cameraBtn"), cameraStopBtn=$("cameraStopBtn"), flipBtn=$("flipBtn"), recordBtn=$("recordBtn"), stopBtn=$("stopBtn");
   const csvBtn=$("csvBtn"), clearBtn=$("clearBtn"), sampleCountEl=$("sampleCount");
   const graph=$("graph"), gctx=graph.getContext("2d");
   const durationPill=$("durationPill"), summaryText=$("summaryText"), modeSelect=$("modeSelect"), modeHint=$("modeHint");
@@ -147,6 +209,7 @@
   let pose=null, stream=null, facingMode="user", running=false, processing=false;
   let recording=false, recordStart=0, samples=[], rafId=null;
   let rightValidCount=0,leftValidCount=0;
+  let formFrames=[];
 
   function log(msg){
     diagEl.textContent += "\n[" + new Date().toLocaleTimeString() + "] " + msg;
@@ -253,6 +316,33 @@
     if(recording){
       if(r!=null)rightValidCount++;
       if(l!=null)leftValidCount++;
+
+      // 2Dフォーム特徴量を保存
+      const upperR=Math.hypot(re.x-rs.x,re.y-rs.y)||1e-6;
+      const upperL=Math.hypot(le.x-ls.x,le.y-ls.y)||1e-6;
+
+      const rForearmDx=rw.x-re.x, rForearmDy=rw.y-re.y;
+      const lForearmDx=lw.x-le.x, lForearmDy=lw.y-le.y;
+      const rForearmLen=Math.hypot(rForearmDx,rForearmDy)||1e-6;
+      const lForearmLen=Math.hypot(lForearmDx,lForearmDy)||1e-6;
+
+      const rVert=Math.acos(Math.max(-1,Math.min(1,Math.abs(rForearmDy)/rForearmLen)))*180/Math.PI;
+      const lVert=Math.acos(Math.max(-1,Math.min(1,Math.abs(lForearmDy)/lForearmLen)))*180/Math.PI;
+
+      formFrames.push({
+        t:(performance.now()-recordStart)/1000,
+        rValid:r!=null,
+        lValid:l!=null,
+        rElbowAngle:r,
+        lElbowAngle:l,
+        rWristBelow:(rw.y-re.y)/upperR,
+        lWristBelow:(lw.y-le.y)/upperL,
+        rForearmVertical:rVert,
+        lForearmVertical:lVert,
+        rCatchReach:Math.hypot(rw.x-rs.x,rw.y-rs.y)/upperR,
+        lCatchReach:Math.hypot(lw.x-ls.x,lw.y-ls.y)/upperL
+      });
+
       if(r!=null||l!=null){
         samples.push({t:(performance.now()-recordStart)/1000,right:r,left:l});
         sampleCountEl.textContent=samples.length+" サンプル";
@@ -288,6 +378,7 @@
       await video.play();
       running=true;
       flipBtn.disabled=false;
+      cameraStopBtn.disabled=false;
       recordBtn.disabled=false;
       cameraBtn.textContent="📷 カメラ再起動";
       setStatus("カメラ起動完了","ok");
@@ -304,6 +395,117 @@
     return {min,max,avg,range:max-min,count:vals.length};
   }
   function deg(v){ return v==null?"--°":Math.round(v)+"°"; }
+
+
+  function clamp01(x){ return Math.max(0,Math.min(1,x)); }
+  function score100(x){ return Math.round(clamp01(x)*100); }
+  function meanSafe(arr){ return arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : null; }
+  function stdSafe(arr){
+    if(arr.length<2)return 0;
+    const m=meanSafe(arr);
+    return Math.sqrt(arr.reduce((s,v)=>s+(v-m)*(v-m),0)/arr.length);
+  }
+
+  function setBar(el,score){
+    if(!el)return;
+    el.style.width=Math.max(0,Math.min(100,score))+"%";
+  }
+
+  function resetFormScore(){
+    totalScoreEl.textContent="--";
+    catchScoreEl.textContent=evfScoreEl.textContent=elbowScoreEl.textContent=repeatScoreEl.textContent="--";
+    setBar(catchBar,0);setBar(evfBar,0);setBar(elbowBar,0);setBar(repeatBar,0);
+    adviceText.textContent="記録停止後に採点します。";
+    phaseCountEl.textContent="0 有効フレーム";
+    formFrames=[];
+  }
+
+  function analyzeForm(){
+    if(formFrames.length<8){
+      resetFormScore();
+      adviceText.textContent="有効フレームが少なすぎます。横〜斜めから、肩・肘・手首が見える状態で5〜10秒ほど記録してください。";
+      return;
+    }
+
+    // 主解析側を決める
+    const mode=modeSelect.value;
+    const usableRight=formFrames.filter(f=>f.rValid);
+    const usableLeft=formFrames.filter(f=>f.lValid);
+
+    let side="right";
+    if(mode==="left")side="left";
+    else if(mode==="right")side="right";
+    else side=usableLeft.length>usableRight.length ? "left" : "right";
+
+    const F=formFrames.filter(f=>side==="right"?f.rValid:f.lValid);
+    if(F.length<8){
+      resetFormScore();
+      adviceText.textContent=(side==="right"?"右":"左")+"腕の有効データが不足しています。";
+      return;
+    }
+
+    // 解析対象は肘がある程度曲がり、前腕が下向きになる「キャッチ〜プル候補」。
+    // 2Dのため完全な局面検出ではなく、練習用の近似。
+    const phase=F.filter(f=>{
+      const e=side==="right"?f.rElbowAngle:f.lElbowAngle;
+      const wristBelow=side==="right"?f.rWristBelow:f.lWristBelow;
+      return Number.isFinite(e) && e>=45 && e<=135 && wristBelow>-0.10;
+    });
+
+    const P=phase.length>=5?phase:F;
+    phaseCountEl.textContent=P.length+" 有効フレーム";
+
+    const elbowAngles=P.map(f=>side==="right"?f.rElbowAngle:f.lElbowAngle).filter(Number.isFinite);
+    const wristBelowVals=P.map(f=>side==="right"?f.rWristBelow:f.lWristBelow).filter(Number.isFinite);
+    const forearmVertical=P.map(f=>side==="right"?f.rForearmVertical:f.lForearmVertical).filter(Number.isFinite);
+    const catchReach=P.map(f=>side==="right"?f.rCatchReach:f.lCatchReach).filter(Number.isFinite);
+
+    // キャッチ: 手首が肩より前方へある程度離れ、かつ極端に身体へ寄りすぎないことを簡易評価
+    // 0.55〜1.6 upper-arm lengths程度を満点帯として近似
+    const catchNorm=catchReach.map(v=>{
+      if(v<0.20)return 0;
+      if(v<0.55)return (v-0.20)/(0.55-0.20);
+      if(v<=1.60)return 1;
+      return Math.max(0,1-(v-1.60)/0.90);
+    });
+    const catchScore=score100(meanSafe(catchNorm)??0);
+
+    // EVF: 前腕が垂直に近いほど高得点。0°=垂直、60°以上=低評価
+    const evfNorm=forearmVertical.map(deg=>clamp01(1-deg/60));
+    const evfScore=score100(meanSafe(evfNorm)??0);
+
+    // 肘落ち: 手首が肘より下にある量を上腕長で正規化。0.15以上を高評価
+    const elbowNorm=wristBelowVals.map(v=>clamp01((v+0.02)/0.22));
+    const elbowScore=score100(meanSafe(elbowNorm)??0);
+
+    // 再現性: 肘角度のばらつき。std 5°以下を高評価、25°以上を低評価
+    const sd=stdSafe(elbowAngles);
+    const repeatScore=score100(1-clamp01((sd-5)/20));
+
+    const total=Math.round(
+      catchScore*0.25+
+      evfScore*0.30+
+      elbowScore*0.30+
+      repeatScore*0.15
+    );
+
+    totalScoreEl.textContent=total;
+    catchScoreEl.textContent=catchScore;
+    evfScoreEl.textContent=evfScore;
+    elbowScoreEl.textContent=elbowScore;
+    repeatScoreEl.textContent=repeatScore;
+    setBar(catchBar,catchScore);setBar(evfBar,evfScore);setBar(elbowBar,elbowScore);setBar(repeatBar,repeatScore);
+
+    const items=[
+      {name:"キャッチ",score:catchScore,msg:"手を前へ伸ばした位置と、肩に対する手首の位置をもう少し安定させてみてください。"},
+      {name:"EVF",score:evfScore,msg:"キャッチ後、肘を残したまま前腕をもう少し縦方向へ立てる意識を試してみてください。"},
+      {name:"肘落ち",score:elbowScore,msg:"手首を下げるときに肘まで一緒に下がらないよう、肘の位置を残す練習をしてみてください。"},
+      {name:"再現性",score:repeatScore,msg:"1回ごとの肘角度のばらつきが大きめです。ゆっくり同じ軌道を繰り返す練習が合いそうです。"}
+    ].sort((a,b)=>a.score-b.score);
+
+    const sideName=side==="right"?"右腕":"左腕";
+    adviceText.textContent=`${sideName}を主解析。最も改善余地が大きいのは「${items[0].name}」です。${items[0].msg}`;
+  }
 
   function renderStats(){
     const rs=statsFor("right"), ls=statsFor("left");
@@ -361,7 +563,56 @@
     rightValidCount=0;leftValidCount=0;
   }
 
+  function stopCamera(){
+    try{
+      running=false;
+      processing=false;
+
+      if(rafId){
+        cancelAnimationFrame(rafId);
+        rafId=null;
+      }
+
+      if(stream){
+        stream.getTracks().forEach(track=>track.stop());
+        stream=null;
+      }
+
+      video.srcObject=null;
+      ctx.clearRect(0,0,overlay.width,overlay.height);
+
+      if(recording){
+        recording=false;
+        recordBtn.disabled=false;
+        stopBtn.disabled=true;
+        csvBtn.disabled=samples.length===0;
+        if(samples.length){
+          renderStats();
+          analyzeForm();
+          drawGraph();
+        }
+      }
+
+      rightAngleEl.textContent="--°";
+      leftAngleEl.textContent="--°";
+      rightQualityEl.textContent="未検出";
+      leftQualityEl.textContent="未検出";
+
+      cameraStopBtn.disabled=true;
+      flipBtn.disabled=true;
+      recordBtn.disabled=true;
+      cameraBtn.disabled=false;
+      cameraBtn.textContent="📷 カメラ開始";
+
+      setStatus("カメラ停止","ok");
+      hint.textContent="カメラを停止しました。「カメラ開始」で再開できます。";
+    }catch(err){
+      fail("カメラ停止",err);
+    }
+  }
+
   cameraBtn.onclick=startCamera;
+  cameraStopBtn.onclick=stopCamera;
   flipBtn.onclick=async()=>{
     facingMode=facingMode==="user"?"environment":"user";
     video.style.transform=facingMode==="user"?"scaleX(-1)":"none";
@@ -371,16 +622,16 @@
   recordBtn.onclick=()=>{
     samples=[];recording=true;recordStart=performance.now();
     recordBtn.disabled=true;stopBtn.disabled=false;csvBtn.disabled=true;
-    sampleCountEl.textContent="0 サンプル";resetStats();drawGraph();
+    sampleCountEl.textContent="0 サンプル";resetStats();resetFormScore();drawGraph();
   };
 
   stopBtn.onclick=()=>{
     recording=false;recordBtn.disabled=false;stopBtn.disabled=true;
-    csvBtn.disabled=samples.length===0;setStatus("記録終了","ok");renderStats();drawGraph();
+    csvBtn.disabled=samples.length===0;setStatus("記録終了","ok");renderStats();analyzeForm();drawGraph();
   };
 
   clearBtn.onclick=()=>{
-    samples=[];sampleCountEl.textContent="0 サンプル";csvBtn.disabled=true;resetStats();drawGraph();
+    samples=[];sampleCountEl.textContent="0 サンプル";csvBtn.disabled=true;resetStats();resetFormScore();drawGraph();
   };
 
   csvBtn.onclick=()=>{
@@ -446,6 +697,7 @@
 
   addEventListener("resize",drawGraph);
   resetStats();
+  resetFormScore();
   drawGraph();
 })();
 </script>
