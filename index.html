@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#07111f">
-  <title>Crawl Form Analyzer v1.7</title>
+  <title>Crawl Form Analyzer v1.8</title>
 
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
@@ -68,7 +68,7 @@
 <body>
 <div class="wrap">
   <h1>🏊 Crawl Form Analyzer</h1>
-  <div class="sub">v1.7 — 理想フォーム採点（実験版）</div>
+  <div class="sub">v1.8 — 採点修正・外れ値除外</div>
 
   <section class="card">
     <label for="modeSelect"><strong>解析モード</strong></label>
@@ -182,7 +182,7 @@
     </div>
 
     <div class="experimental">
-      ※ スマホ1台の2D映像から推定する練習用スコアです。競技上の絶対的な正解を判定するものではありません。
+      ※ スマホ1台の2D映像から推定する練習用スコアです。v1.8では急激な誤検出を自動除外します。競技上の絶対的な正解を判定するものではありません。
     </div>
   </section>
 
@@ -202,6 +202,17 @@
   const cameraBtn=$("cameraBtn"), cameraStopBtn=$("cameraStopBtn"), flipBtn=$("flipBtn"), recordBtn=$("recordBtn"), stopBtn=$("stopBtn");
   const csvBtn=$("csvBtn"), clearBtn=$("clearBtn"), sampleCountEl=$("sampleCount");
   const graph=$("graph"), gctx=graph.getContext("2d");
+  const totalScoreEl=$("totalScore");
+  const catchScoreEl=$("catchScore");
+  const evfScoreEl=$("evfScore");
+  const elbowScoreEl=$("elbowScore");
+  const repeatScoreEl=$("repeatScore");
+  const catchBar=$("catchBar");
+  const evfBar=$("evfBar");
+  const elbowBar=$("elbowBar");
+  const repeatBar=$("repeatBar");
+  const adviceText=$("adviceText");
+  const phaseCountEl=$("phaseCount");
   const durationPill=$("durationPill"), summaryText=$("summaryText"), modeSelect=$("modeSelect"), modeHint=$("modeHint");
   const rMin=$("rMin"),rMax=$("rMax"),rAvg=$("rAvg"),rRange=$("rRange");
   const lMin=$("lMin"),lMax=$("lMax"),lAvg=$("lAvg"),lRange=$("lRange");
@@ -387,9 +398,54 @@
     }catch(err){ fail("カメラ起動",err); }
   }
 
+  // v1.8: 瞬間的な誤検出を除外する。
+  // ・肘角度が極端に小さい値（10°未満）
+  // ・直前の有効点からの角速度が900°/sを超える急変
+  // を統計・採点から外す。元データ自体はCSVに残す。
+  function filteredSeries(key){
+    const result=[];
+    let prev=null;
+    for(const s of samples){
+      const v=s[key];
+      if(!Number.isFinite(v)) continue;
+      if(v<10 || v>179.5) continue;
+
+      if(prev){
+        const dt=s.t-prev.t;
+        if(dt>0){
+          const speed=Math.abs(v-prev.v)/dt;
+          if(speed>900) continue;
+        }
+      }
+      result.push({t:s.t,v});
+      prev={t:s.t,v};
+    }
+    return result;
+  }
+
+  function filteredFormFrames(side){
+    const angleKey=side==="right"?"rElbowAngle":"lElbowAngle";
+    const validKey=side==="right"?"rValid":"lValid";
+    const src=formFrames.filter(f=>f[validKey] && Number.isFinite(f[angleKey]));
+    const out=[];
+    let prev=null;
+    for(const f of src){
+      const a=f[angleKey];
+      if(a<10 || a>179.5) continue;
+      if(prev){
+        const dt=f.t-prev.t;
+        if(dt>0 && Math.abs(a-prev.a)/dt>900) continue;
+      }
+      out.push(f);
+      prev={t:f.t,a};
+    }
+    return out;
+  }
+
   function mean(arr){ return arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : null; }
   function statsFor(key){
-    const vals=samples.map(s=>s[key]).filter(v=>Number.isFinite(v));
+    const series=filteredSeries(key);
+    const vals=series.map(x=>x.v);
     if(!vals.length)return null;
     const min=Math.min(...vals),max=Math.max(...vals),avg=mean(vals);
     return {min,max,avg,range:max-min,count:vals.length};
@@ -429,15 +485,16 @@
 
     // 主解析側を決める
     const mode=modeSelect.value;
-    const usableRight=formFrames.filter(f=>f.rValid);
-    const usableLeft=formFrames.filter(f=>f.lValid);
+    const usableRight=filteredFormFrames("right");
+    const usableLeft=filteredFormFrames("left");
 
     let side="right";
     if(mode==="left")side="left";
     else if(mode==="right")side="right";
     else side=usableLeft.length>usableRight.length ? "left" : "right";
 
-    const F=formFrames.filter(f=>side==="right"?f.rValid:f.lValid);
+    const rawSideCount=formFrames.filter(f=>side==="right"?f.rValid:f.lValid).length;
+    const F=side==="right"?usableRight:usableLeft;
     if(F.length<8){
       resetFormScore();
       adviceText.textContent=(side==="right"?"右":"左")+"腕の有効データが不足しています。";
@@ -453,7 +510,7 @@
     });
 
     const P=phase.length>=5?phase:F;
-    phaseCountEl.textContent=P.length+" 有効フレーム";
+    phaseCountEl.textContent=P.length+" 有効 / "+Math.max(0,rawSideCount-F.length)+" 除外";
 
     const elbowAngles=P.map(f=>side==="right"?f.rElbowAngle:f.lElbowAngle).filter(Number.isFinite);
     const wristBelowVals=P.map(f=>side==="right"?f.rWristBelow:f.lWristBelow).filter(Number.isFinite);
@@ -646,6 +703,7 @@
       ].join(",")),
       "",
       "summary,value",
+      "filter,angle>=10deg_and_speed<=900deg_per_s",
       "mode,"+modeSelect.value,
       "right_valid_count,"+rightValidCount,
       "left_valid_count,"+leftValidCount,
@@ -685,8 +743,9 @@
     const tmax=Math.max(.1,samples[samples.length-1].t);
     const plot=(key,color)=>{
       gctx.strokeStyle=color;gctx.lineWidth=2;gctx.beginPath();let started=false;
-      for(const s of samples){
-        const v=s[key];if(v==null)continue;
+      const series=filteredSeries(key);
+      for(const s of series){
+        const v=s.v;
         const x=p.l+iw*(s.t/tmax),y=p.t+ih*(1-v/180);
         if(!started){gctx.moveTo(x,y);started=true}else gctx.lineTo(x,y);
       }
