@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#07111f">
-  <title>Crawl Form Analyzer v2.0</title>
+  <title>Crawl Form Analyzer v2.1</title>
 
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
@@ -90,12 +90,19 @@
     canvas#waveGraph{width:100%;height:100%}
     .analysisBadge{display:inline-block;background:#143653;color:#d8f0ff;padding:5px 9px;border-radius:999px;font-size:11px}
 
+  
+    .forearmGrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+    .forearmBox{background:#0a1826;border-radius:14px;padding:12px;text-align:center}
+    .forearmBox .small{color:var(--muted);font-size:12px}
+    .forearmBox .big{font-size:28px;font-weight:900;margin-top:4px}
+    .forearmBox .desc{font-size:11px;color:var(--muted);margin-top:4px}
+
   </style>
 </head>
 <body>
 <div class="wrap">
   <h1>🏊 Crawl Form Analyzer</h1>
-  <div class="sub">v2.0 — 中央ストローク解析・波形再現性</div>
+  <div class="sub">v2.1 — 前腕角度EVF解析</div>
 
   <section class="card">
     <div class="settingGrid">
@@ -131,6 +138,19 @@
     <div class="grid">
       <div class="metric"><div class="label">右ひじ</div><div class="value" id="rightAngle">--°</div><div class="quality" id="rightQuality">未検出</div></div>
       <div class="metric"><div class="label">左ひじ</div><div class="value" id="leftAngle">--°</div><div class="quality" id="leftQuality">未検出</div></div>
+    </div>
+
+    <div class="forearmGrid">
+      <div class="forearmBox">
+        <div class="small">右前腕角度</div>
+        <div class="big" id="rightForearmAngle">--°</div>
+        <div class="desc">0°に近いほど前腕が縦</div>
+      </div>
+      <div class="forearmBox">
+        <div class="small">左前腕角度</div>
+        <div class="big" id="leftForearmAngle">--°</div>
+        <div class="desc">0°に近いほど前腕が縦</div>
+      </div>
     </div>
 
     <div class="buttons">
@@ -223,7 +243,7 @@
     </div>
 
     <div class="experimental">
-      ※ スマホ1台の2D映像から推定する練習用スコアです。v2.0では最初と最後のストロークを自動除外し、中央ストロークの波形比較から再現性を評価します。競技上の絶対的な正解を判定するものではありません。
+      ※ スマホ1台の2D映像から推定する練習用スコアです。v2.1ではEVFを肘→手首の前腕ベクトル角度から直接評価します。0°に近いほど前腕が縦です。最初と最後のストローク除外と波形再現性も継続します。競技上の絶対的な正解を判定するものではありません。
     </div>
   </section>
 
@@ -260,6 +280,7 @@
   const video=$("video"), overlay=$("overlay"), ctx=overlay.getContext("2d");
   const statusEl=$("status"), diagEl=$("diag"), hint=$("hint");
   const rightAngleEl=$("rightAngle"), leftAngleEl=$("leftAngle");
+  const rightForearmAngleEl=$("rightForearmAngle"), leftForearmAngleEl=$("leftForearmAngle");
   const rightQualityEl=$("rightQuality"), leftQualityEl=$("leftQuality");
   const cameraBtn=$("cameraBtn"), cameraStopBtn=$("cameraStopBtn"), flipBtn=$("flipBtn"), recordBtn=$("recordBtn"), stopBtn=$("stopBtn");
   const csvBtn=$("csvBtn"), clearBtn=$("clearBtn"), sampleCountEl=$("sampleCount");
@@ -376,6 +397,7 @@
     if(!lm){
       rightAngleEl.textContent=leftAngleEl.textContent="--°";
       rightQualityEl.textContent=leftQualityEl.textContent="未検出";
+      rightForearmAngleEl.textContent=leftForearmAngleEl.textContent="--°";
       statusEl.textContent="全身を画面に入れてください";
       statusEl.className="status";
       return;
@@ -414,6 +436,9 @@
 
       const rVert=Math.acos(Math.max(-1,Math.min(1,Math.abs(rForearmDy)/rForearmLen)))*180/Math.PI;
       const lVert=Math.acos(Math.max(-1,Math.min(1,Math.abs(lForearmDy)/lForearmLen)))*180/Math.PI;
+
+      rightForearmAngleEl.textContent=rOk?Math.round(rVert)+"°":"--°";
+      leftForearmAngleEl.textContent=lOk?Math.round(lVert)+"°":"--°";
 
       formFrames.push({
         t:(performance.now()-recordStart)/1000,
@@ -589,7 +614,15 @@
     });
 
     let catchScore=score100(meanSafe(catchNorm)??0);
-    let evfScore=score100(meanSafe(forearmVertical.map(d=>clamp01(1-d/60)))??0);
+    // v2.1 EVF: 前腕ベクトルの縦方向角度を直接評価
+    // 0〜20° = 高評価、20〜45° = 徐々に減点、60°以上 = 低評価
+    const evfNorm=forearmVertical.map(d=>{
+      if(d<=20)return 1;
+      if(d<=45)return 1-(d-20)/35;
+      if(d<=60)return Math.max(0,0.29-(d-45)/52);
+      return 0;
+    });
+    let evfScore=score100(meanSafe(evfNorm)??0);
     let elbowScore=score100(meanSafe(wristBelowVals.map(v=>clamp01((v+0.02)/0.22)))??0);
     const sd=stdSafe(elbowAngles);
     let repeatScore=score100(1-clamp01((sd-5)/20));
@@ -600,7 +633,9 @@
     else if(ang==="diag_back_25"){catchScore=Math.round(catchScore*.75);evfScore=Math.round(evfScore*.80);}
 
     const total=Math.round(catchScore*.25+evfScore*.30+elbowScore*.30+repeatScore*.15);
-    return {total,catchScore,evfScore,elbowScore,repeatScore,validFrames:P.length,elbowSd:sd};
+    const forearmMean=meanSafe(forearmVertical);
+    const forearmMin=forearmVertical.length?Math.min(...forearmVertical):null;
+    return {total,catchScore,evfScore,elbowScore,repeatScore,validFrames:P.length,elbowSd:sd,forearmMean,forearmMin};
   }
 
   function analyzeForm(){
@@ -631,7 +666,7 @@
 
     const items=[
       {name:"キャッチ",score:result.catchScore,msg:"手を前へ伸ばした位置と、肩に対する手首の位置をもう少し安定させてみてください。"},
-      {name:"EVF",score:result.evfScore,msg:"キャッチ後、肘を残したまま前腕をもう少し縦方向へ立てる意識を試してみてください。"},
+      {name:"EVF",score:result.evfScore,msg:"キャッチ後、肘の位置を保ちながら前腕角度を20〜30°以内へ近づける意識を試してみてください。"},
       {name:"肘落ち",score:result.elbowScore,msg:"手首を下げるときに肘まで一緒に下がらないよう、肘の位置を残す練習をしてみてください。"},
       {name:"再現性",score:result.repeatScore,msg:"同じ軌道をゆっくり繰り返す練習が合いそうです。"}
     ].sort((a,b)=>a.score-b.score);
@@ -853,7 +888,7 @@
           <div class="miniMetric"><span>肘落ち</span><b>${r.elbowScore}</b></div>
           <div class="miniMetric"><span>再現性</span><b>${repText}</b></div>
         </div>
-        <div class="confidence">${r.start.toFixed(1)}〜${r.end.toFixed(1)}秒（${r.duration.toFixed(1)}秒）・有効 ${r.validFrames}フレーム${excluded?"・操作影響の可能性があるため採点平均から除外":""}</div>`;
+        <div class="confidence">${r.start.toFixed(1)}〜${r.end.toFixed(1)}秒（${r.duration.toFixed(1)}秒）・有効 ${r.validFrames}フレーム${Number.isFinite(r.forearmMean)?"・前腕平均 "+r.forearmMean.toFixed(1)+"°":""}${Number.isFinite(r.forearmMin)?"・最小 "+r.forearmMin.toFixed(1)+"°":""}${excluded?"・操作影響の可能性があるため採点平均から除外":""}</div>`;
       strokeList.appendChild(div);
     }
 
@@ -952,6 +987,8 @@
       leftAngleEl.textContent="--°";
       rightQualityEl.textContent="未検出";
       leftQualityEl.textContent="未検出";
+      rightForearmAngleEl.textContent="--°";
+      leftForearmAngleEl.textContent="--°";
 
       cameraStopBtn.disabled=true;
       flipBtn.disabled=true;
@@ -1019,9 +1056,9 @@
     ];
     if(strokeResults.length){
       rows.push("");
-      rows.push("stroke_index,start_s,end_s,duration_s,total,catch,evf,elbow_drop,repeatability,valid_frames,used_for_main_analysis");
+      rows.push("stroke_index,start_s,end_s,duration_s,total,catch,evf,elbow_drop,repeatability,forearm_mean_deg,forearm_min_deg,valid_frames,used_for_main_analysis");
       for(const r of strokeResults){
-        rows.push([r.index,r.start.toFixed(3),r.end.toFixed(3),r.duration.toFixed(3),r.total,r.catchScore,r.evfScore,r.elbowScore,r.repeatScore,r.validFrames,analyzedStrokes.includes(r)?"yes":"no"].join(","));
+        rows.push([r.index,r.start.toFixed(3),r.end.toFixed(3),r.duration.toFixed(3),r.total,r.catchScore,r.evfScore,r.elbowScore,r.repeatScore,Number.isFinite(r.forearmMean)?r.forearmMean.toFixed(2):"",Number.isFinite(r.forearmMin)?r.forearmMin.toFixed(2):"",r.validFrames,analyzedStrokes.includes(r)?"yes":"no"].join(","));
       }
     }
     const blob=new Blob([rows.join("\n")],{type:"text/csv;charset=utf-8"});
