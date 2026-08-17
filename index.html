@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#07111f">
-  <title>Crawl Form Analyzer v1.8</title>
+  <title>Crawl Form Analyzer v1.9</title>
 
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
@@ -63,21 +63,47 @@
     .advice p{margin:0;color:#d7e4f2;font-size:13px;line-height:1.6}
     .experimental{font-size:12px;color:var(--muted);margin-top:8px;line-height:1.5}
 
+  
+    .settingGrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    @media(max-width:560px){.settingGrid{grid-template-columns:1fr}}
+    .strokeList{display:grid;gap:10px;margin-top:10px}
+    .strokeCard{background:#0a1826;border-radius:14px;padding:12px}
+    .strokeHead{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:8px}
+    .strokeScore{font-size:24px;font-weight:900}
+    .miniGrid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+    .miniMetric{background:#10243a;border-radius:10px;padding:8px;text-align:center}
+    .miniMetric span{display:block;font-size:10px;color:var(--muted)}
+    .miniMetric b{font-size:15px}
+    .confidence{font-size:12px;color:var(--muted);margin-top:8px;line-height:1.5}
   </style>
 </head>
 <body>
 <div class="wrap">
   <h1>🏊 Crawl Form Analyzer</h1>
-  <div class="sub">v1.8 — 採点修正・外れ値除外</div>
+  <div class="sub">v1.9 — ストローク自動分割・撮影角度指定</div>
 
   <section class="card">
-    <label for="modeSelect"><strong>解析モード</strong></label>
-    <select id="modeSelect">
-      <option value="auto">自動判定</option>
-      <option value="right">右腕のみ</option>
-      <option value="left">左腕のみ</option>
-    </select>
+    <div class="settingGrid">
+      <div>
+        <label for="modeSelect"><strong>解析モード</strong></label>
+        <select id="modeSelect">
+          <option value="auto">自動判定</option>
+          <option value="right">右腕のみ</option>
+          <option value="left">左腕のみ</option>
+        </select>
+      </div>
+      <div>
+        <label for="cameraAngleSelect"><strong>撮影角度</strong></label>
+        <select id="cameraAngleSelect">
+          <option value="diag_front_25">斜め前 約25°（推奨）</option>
+          <option value="side_90">真横 約90°</option>
+          <option value="front_0">正面 約0°</option>
+          <option value="diag_back_25">斜め後ろ 約25°</option>
+        </select>
+      </div>
+    </div>
     <div class="notice" id="modeHint">自動判定では、記録中により安定して見えている腕を優先します。</div>
+    <div class="notice" id="angleHint">斜め前25°は、肩・肘・手首が重なりにくく、キャッチ・EVF・肘落ちをまとめて見やすい角度です。</div>
   </section>
 
   <section class="card">
@@ -182,8 +208,17 @@
     </div>
 
     <div class="experimental">
-      ※ スマホ1台の2D映像から推定する練習用スコアです。v1.8では急激な誤検出を自動除外します。競技上の絶対的な正解を判定するものではありません。
+      ※ スマホ1台の2D映像から推定する練習用スコアです。v1.9では撮影角度を指定し、1ストロークごとの比較にも対応します。競技上の絶対的な正解を判定するものではありません。
     </div>
+  </section>
+
+  <section class="card">
+    <div class="row">
+      <strong>ストローク別解析</strong>
+      <span class="pill" id="strokeCountPill">0 ストローク</span>
+    </div>
+    <div class="notice" id="strokeHint">肘角度の伸展ピークを使って、1ストロークごとに自動分割します。</div>
+    <div class="strokeList" id="strokeList"></div>
   </section>
 
   <section class="card">
@@ -213,6 +248,8 @@
   const repeatBar=$("repeatBar");
   const adviceText=$("adviceText");
   const phaseCountEl=$("phaseCount");
+  const cameraAngleSelect=$("cameraAngleSelect"), angleHint=$("angleHint");
+  const strokeCountPill=$("strokeCountPill"), strokeHint=$("strokeHint"), strokeList=$("strokeList");
   const durationPill=$("durationPill"), summaryText=$("summaryText"), modeSelect=$("modeSelect"), modeHint=$("modeHint");
   const rMin=$("rMin"),rMax=$("rMax"),rAvg=$("rAvg"),rRange=$("rRange");
   const lMin=$("lMin"),lMax=$("lMax"),lAvg=$("lAvg"),lRange=$("lRange");
@@ -221,6 +258,7 @@
   let recording=false, recordStart=0, samples=[], rafId=null;
   let rightValidCount=0,leftValidCount=0;
   let formFrames=[];
+  let strokeResults=[];
 
   function log(msg){
     diagEl.textContent += "\n[" + new Date().toLocaleTimeString() + "] " + msg;
@@ -241,6 +279,13 @@
     modeHint.textContent=v==="auto"?"自動判定では、記録中により安定して見えている腕を優先します。":
       v==="right"?"右腕だけで解析します。左腕の未検出は無視します。":
       "左腕だけで解析します。右腕の未検出は無視します。";
+  };
+  cameraAngleSelect.onchange=()=>{
+    const v=cameraAngleSelect.value;
+    if(v==="diag_front_25") angleHint.textContent="斜め前25°：推奨。肩・肘・手首が重なりにくく、キャッチ・EVF・肘落ちの総合判定に向きます。";
+    else if(v==="side_90") angleHint.textContent="真横90°：肘角度と前腕の向きは見やすいですが、肩・肘・手首が重なる瞬間があります。";
+    else if(v==="front_0") angleHint.textContent="正面0°：左右差は見やすいですが、前後方向のキャッチ位置は2Dでは精度が落ちます。";
+    else angleHint.textContent="斜め後ろ25°：リカバリーは見やすい一方、キャッチ・EVF採点の信頼度は下がります。";
   };
 
   addEventListener("error",e=>log("window error: "+(e.message||"unknown")));
@@ -474,95 +519,142 @@
     adviceText.textContent="記録停止後に採点します。";
     phaseCountEl.textContent="0 有効フレーム";
     formFrames=[];
+    strokeResults=[];
+    strokeList.innerHTML="";
+    strokeCountPill.textContent="0 ストローク";
+    strokeHint.textContent="肘角度の伸展ピークを使って、1ストロークごとに自動分割します。";
   }
 
-  function analyzeForm(){
-    if(formFrames.length<8){
-      resetFormScore();
-      adviceText.textContent="有効フレームが少なすぎます。横〜斜めから、肩・肘・手首が見える状態で5〜10秒ほど記録してください。";
-      return;
-    }
-
-    // 主解析側を決める
+  function choosePrimarySide(){
     const mode=modeSelect.value;
-    const usableRight=filteredFormFrames("right");
-    const usableLeft=filteredFormFrames("left");
+    const r=filteredFormFrames("right"),l=filteredFormFrames("left");
+    if(mode==="right")return "right";
+    if(mode==="left")return "left";
+    return l.length>r.length?"left":"right";
+  }
 
-    let side="right";
-    if(mode==="left")side="left";
-    else if(mode==="right")side="right";
-    else side=usableLeft.length>usableRight.length ? "left" : "right";
-
-    const rawSideCount=formFrames.filter(f=>side==="right"?f.rValid:f.lValid).length;
-    const F=side==="right"?usableRight:usableLeft;
-    if(F.length<8){
-      resetFormScore();
-      adviceText.textContent=(side==="right"?"右":"左")+"腕の有効データが不足しています。";
-      return;
-    }
-
-    // 解析対象は肘がある程度曲がり、前腕が下向きになる「キャッチ〜プル候補」。
-    // 2Dのため完全な局面検出ではなく、練習用の近似。
+  function scoreFrameGroup(F,side){
+    if(!F||F.length<5)return null;
     const phase=F.filter(f=>{
       const e=side==="right"?f.rElbowAngle:f.lElbowAngle;
       const wristBelow=side==="right"?f.rWristBelow:f.lWristBelow;
-      return Number.isFinite(e) && e>=45 && e<=135 && wristBelow>-0.10;
+      return Number.isFinite(e)&&e>=45&&e<=135&&wristBelow>-0.10;
     });
-
     const P=phase.length>=5?phase:F;
-    phaseCountEl.textContent=P.length+" 有効 / "+Math.max(0,rawSideCount-F.length)+" 除外";
-
     const elbowAngles=P.map(f=>side==="right"?f.rElbowAngle:f.lElbowAngle).filter(Number.isFinite);
     const wristBelowVals=P.map(f=>side==="right"?f.rWristBelow:f.lWristBelow).filter(Number.isFinite);
     const forearmVertical=P.map(f=>side==="right"?f.rForearmVertical:f.lForearmVertical).filter(Number.isFinite);
     const catchReach=P.map(f=>side==="right"?f.rCatchReach:f.lCatchReach).filter(Number.isFinite);
 
-    // キャッチ: 手首が肩より前方へある程度離れ、かつ極端に身体へ寄りすぎないことを簡易評価
-    // 0.55〜1.6 upper-arm lengths程度を満点帯として近似
     const catchNorm=catchReach.map(v=>{
       if(v<0.20)return 0;
       if(v<0.55)return (v-0.20)/(0.55-0.20);
       if(v<=1.60)return 1;
       return Math.max(0,1-(v-1.60)/0.90);
     });
-    const catchScore=score100(meanSafe(catchNorm)??0);
 
-    // EVF: 前腕が垂直に近いほど高得点。0°=垂直、60°以上=低評価
-    const evfNorm=forearmVertical.map(deg=>clamp01(1-deg/60));
-    const evfScore=score100(meanSafe(evfNorm)??0);
-
-    // 肘落ち: 手首が肘より下にある量を上腕長で正規化。0.15以上を高評価
-    const elbowNorm=wristBelowVals.map(v=>clamp01((v+0.02)/0.22));
-    const elbowScore=score100(meanSafe(elbowNorm)??0);
-
-    // 再現性: 肘角度のばらつき。std 5°以下を高評価、25°以上を低評価
+    let catchScore=score100(meanSafe(catchNorm)??0);
+    let evfScore=score100(meanSafe(forearmVertical.map(d=>clamp01(1-d/60)))??0);
+    let elbowScore=score100(meanSafe(wristBelowVals.map(v=>clamp01((v+0.02)/0.22)))??0);
     const sd=stdSafe(elbowAngles);
-    const repeatScore=score100(1-clamp01((sd-5)/20));
+    let repeatScore=score100(1-clamp01((sd-5)/20));
 
-    const total=Math.round(
-      catchScore*0.25+
-      evfScore*0.30+
-      elbowScore*0.30+
-      repeatScore*0.15
-    );
+    const ang=cameraAngleSelect.value;
+    if(ang==="front_0"){catchScore=Math.round(catchScore*.78);evfScore=Math.round(evfScore*.85);}
+    else if(ang==="side_90"){catchScore=Math.round(catchScore*.90);}
+    else if(ang==="diag_back_25"){catchScore=Math.round(catchScore*.75);evfScore=Math.round(evfScore*.80);}
 
-    totalScoreEl.textContent=total;
-    catchScoreEl.textContent=catchScore;
-    evfScoreEl.textContent=evfScore;
-    elbowScoreEl.textContent=elbowScore;
-    repeatScoreEl.textContent=repeatScore;
-    setBar(catchBar,catchScore);setBar(evfBar,evfScore);setBar(elbowBar,elbowScore);setBar(repeatBar,repeatScore);
+    const total=Math.round(catchScore*.25+evfScore*.30+elbowScore*.30+repeatScore*.15);
+    return {total,catchScore,evfScore,elbowScore,repeatScore,validFrames:P.length,elbowSd:sd};
+  }
+
+  function analyzeForm(){
+    if(formFrames.length<8){
+      resetFormScore();
+      adviceText.textContent="有効フレームが少なすぎます。5〜10秒ほど記録してください。";
+      return;
+    }
+    const side=choosePrimarySide();
+    const usable=filteredFormFrames(side);
+    const rawSideCount=formFrames.filter(f=>side==="right"?f.rValid:f.lValid).length;
+    if(usable.length<8){
+      resetFormScore();
+      adviceText.textContent=(side==="right"?"右":"左")+"腕の有効データが不足しています。";
+      return;
+    }
+    const result=scoreFrameGroup(usable,side);
+    if(!result)return;
+    phaseCountEl.textContent=result.validFrames+" 有効 / "+Math.max(0,rawSideCount-usable.length)+" 除外";
+    totalScoreEl.textContent=result.total;
+    catchScoreEl.textContent=result.catchScore;evfScoreEl.textContent=result.evfScore;
+    elbowScoreEl.textContent=result.elbowScore;repeatScoreEl.textContent=result.repeatScore;
+    setBar(catchBar,result.catchScore);setBar(evfBar,result.evfScore);setBar(elbowBar,result.elbowScore);setBar(repeatBar,result.repeatScore);
 
     const items=[
-      {name:"キャッチ",score:catchScore,msg:"手を前へ伸ばした位置と、肩に対する手首の位置をもう少し安定させてみてください。"},
-      {name:"EVF",score:evfScore,msg:"キャッチ後、肘を残したまま前腕をもう少し縦方向へ立てる意識を試してみてください。"},
-      {name:"肘落ち",score:elbowScore,msg:"手首を下げるときに肘まで一緒に下がらないよう、肘の位置を残す練習をしてみてください。"},
-      {name:"再現性",score:repeatScore,msg:"1回ごとの肘角度のばらつきが大きめです。ゆっくり同じ軌道を繰り返す練習が合いそうです。"}
+      {name:"キャッチ",score:result.catchScore,msg:"手を前へ伸ばした位置と、肩に対する手首の位置をもう少し安定させてみてください。"},
+      {name:"EVF",score:result.evfScore,msg:"キャッチ後、肘を残したまま前腕をもう少し縦方向へ立てる意識を試してみてください。"},
+      {name:"肘落ち",score:result.elbowScore,msg:"手首を下げるときに肘まで一緒に下がらないよう、肘の位置を残す練習をしてみてください。"},
+      {name:"再現性",score:result.repeatScore,msg:"同じ軌道をゆっくり繰り返す練習が合いそうです。"}
     ].sort((a,b)=>a.score-b.score);
-
-    const sideName=side==="right"?"右腕":"左腕";
-    adviceText.textContent=`${sideName}を主解析。最も改善余地が大きいのは「${items[0].name}」です。${items[0].msg}`;
+    adviceText.textContent=`${side==="right"?"右腕":"左腕"}を主解析。最も改善余地が大きいのは「${items[0].name}」です。${items[0].msg}`;
   }
+
+  function detectStrokeSegments(){
+    strokeResults=[];strokeList.innerHTML="";strokeCountPill.textContent="0 ストローク";
+    const side=choosePrimarySide();
+    const F=filteredFormFrames(side);
+    if(F.length<20){
+      strokeHint.textContent="有効データが少なく、自動分割できませんでした。8〜15秒ほど記録してみてください。";
+      return;
+    }
+    const angleKey=side==="right"?"rElbowAngle":"lElbowAngle";
+    const candidates=[];
+    for(let i=2;i<F.length-2;i++){
+      const a=F[i][angleKey];
+      if(!Number.isFinite(a)||a<130)continue;
+      if(a>=F[i-1][angleKey]&&a>=F[i+1][angleKey]&&a>=F[i-2][angleKey]&&a>=F[i+2][angleKey])candidates.push(i);
+    }
+    const peaks=[];
+    for(const idx of candidates){
+      if(!peaks.length){peaks.push(idx);continue;}
+      const last=peaks[peaks.length-1],dt=F[idx].t-F[last].t;
+      if(dt<0.8){
+        if(F[idx][angleKey]>F[last][angleKey])peaks[peaks.length-1]=idx;
+      }else peaks.push(idx);
+    }
+    if(peaks.length<2){
+      strokeHint.textContent="伸展ピークを2つ以上検出できませんでした。腕を伸ばすところまで含めて2〜4ストローク記録してください。";
+      return;
+    }
+    for(let k=0;k<peaks.length-1;k++){
+      const a=peaks[k],b=peaks[k+1],seg=F.slice(a,b+1),duration=F[b].t-F[a].t;
+      if(duration<0.6||duration>4.0||seg.length<6)continue;
+      const score=scoreFrameGroup(seg,side);
+      if(!score)continue;
+      strokeResults.push({index:strokeResults.length+1,side,start:F[a].t,end:F[b].t,duration,...score});
+    }
+    if(!strokeResults.length){
+      strokeHint.textContent="ピークは見つかりましたが、十分な長さのストローク区間を作れませんでした。";
+      return;
+    }
+    strokeCountPill.textContent=strokeResults.length+" ストローク";
+    const avg=strokeResults.reduce((s,x)=>s+x.total,0)/strokeResults.length;
+    const sd=stdSafe(strokeResults.map(x=>x.total));
+    strokeHint.textContent=`${side==="right"?"右":"左"}腕を主解析。平均 ${avg.toFixed(1)}点、ストローク間SD ${sd.toFixed(1)}。`;
+    for(const r of strokeResults){
+      const div=document.createElement("div");div.className="strokeCard";
+      div.innerHTML=`<div class="strokeHead"><strong>ストローク ${r.index}</strong><span><span class="strokeScore">${r.total}</span> /100</span></div>
+      <div class="miniGrid">
+        <div class="miniMetric"><span>キャッチ</span><b>${r.catchScore}</b></div>
+        <div class="miniMetric"><span>EVF</span><b>${r.evfScore}</b></div>
+        <div class="miniMetric"><span>肘落ち</span><b>${r.elbowScore}</b></div>
+        <div class="miniMetric"><span>再現性</span><b>${r.repeatScore}</b></div>
+      </div>
+      <div class="confidence">${r.start.toFixed(1)}〜${r.end.toFixed(1)}秒（${r.duration.toFixed(1)}秒）・有効 ${r.validFrames}フレーム</div>`;
+      strokeList.appendChild(div);
+    }
+  }
+
 
   function renderStats(){
     const rs=statsFor("right"), ls=statsFor("left");
@@ -646,6 +738,7 @@
         if(samples.length){
           renderStats();
           analyzeForm();
+          detectStrokeSegments();
           drawGraph();
         }
       }
@@ -684,7 +777,7 @@
 
   stopBtn.onclick=()=>{
     recording=false;recordBtn.disabled=false;stopBtn.disabled=true;
-    csvBtn.disabled=samples.length===0;setStatus("記録終了","ok");renderStats();analyzeForm();drawGraph();
+    csvBtn.disabled=samples.length===0;setStatus("記録終了","ok");renderStats();analyzeForm();detectStrokeSegments();drawGraph();
   };
 
   clearBtn.onclick=()=>{
@@ -705,6 +798,7 @@
       "summary,value",
       "filter,angle>=10deg_and_speed<=900deg_per_s",
       "mode,"+modeSelect.value,
+      "camera_angle,"+cameraAngleSelect.value,
       "right_valid_count,"+rightValidCount,
       "left_valid_count,"+leftValidCount,
       "duration_s,"+(samples[samples.length-1]?.t||0).toFixed(3),
@@ -717,6 +811,13 @@
       "left_avg_deg,"+(ls?.avg?.toFixed(2)??""),
       "left_range_deg,"+(ls?.range?.toFixed(2)??"")
     ];
+    if(strokeResults.length){
+      rows.push("");
+      rows.push("stroke_index,start_s,end_s,duration_s,total,catch,evf,elbow_drop,repeatability,valid_frames");
+      for(const r of strokeResults){
+        rows.push([r.index,r.start.toFixed(3),r.end.toFixed(3),r.duration.toFixed(3),r.total,r.catchScore,r.evfScore,r.elbowScore,r.repeatScore,r.validFrames].join(","));
+      }
+    }
     const blob=new Blob([rows.join("\n")],{type:"text/csv;charset=utf-8"});
     const a=document.createElement("a");
     a.href=URL.createObjectURL(blob);
