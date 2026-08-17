@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#07111f">
-  <title>Crawl Form Analyzer v1.9</title>
+  <title>Crawl Form Analyzer v2.0</title>
 
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
@@ -75,12 +75,27 @@
     .miniMetric span{display:block;font-size:10px;color:var(--muted)}
     .miniMetric b{font-size:15px}
     .confidence{font-size:12px;color:var(--muted);margin-top:8px;line-height:1.5}
+  
+    .excluded{opacity:.45;filter:saturate(.6)}
+    .excluded .strokeHead::after{
+      content:"除外";
+      font-size:11px;
+      color:#ffd6d6;
+      background:#6a2631;
+      padding:4px 8px;
+      border-radius:999px;
+      margin-left:auto
+    }
+    .waveWrap{height:260px;background:#081522;border-radius:14px;overflow:hidden;margin-top:10px}
+    canvas#waveGraph{width:100%;height:100%}
+    .analysisBadge{display:inline-block;background:#143653;color:#d8f0ff;padding:5px 9px;border-radius:999px;font-size:11px}
+
   </style>
 </head>
 <body>
 <div class="wrap">
   <h1>🏊 Crawl Form Analyzer</h1>
-  <div class="sub">v1.9 — ストローク自動分割・撮影角度指定</div>
+  <div class="sub">v2.0 — 中央ストローク解析・波形再現性</div>
 
   <section class="card">
     <div class="settingGrid">
@@ -208,7 +223,7 @@
     </div>
 
     <div class="experimental">
-      ※ スマホ1台の2D映像から推定する練習用スコアです。v1.9では撮影角度を指定し、1ストロークごとの比較にも対応します。競技上の絶対的な正解を判定するものではありません。
+      ※ スマホ1台の2D映像から推定する練習用スコアです。v2.0では最初と最後のストロークを自動除外し、中央ストロークの波形比較から再現性を評価します。競技上の絶対的な正解を判定するものではありません。
     </div>
   </section>
 
@@ -219,6 +234,18 @@
     </div>
     <div class="notice" id="strokeHint">肘角度の伸展ピークを使って、1ストロークごとに自動分割します。</div>
     <div class="strokeList" id="strokeList"></div>
+  </section>
+
+
+  <section class="card">
+    <div class="row">
+      <strong>ストローク波形比較</strong>
+      <span class="analysisBadge" id="waveInfo">解析待ち</span>
+    </div>
+    <div class="waveWrap"><canvas id="waveGraph"></canvas></div>
+    <div class="notice" id="waveHint">
+      中央ストロークを0〜100%に正規化して重ねます。線が重なるほど再現性が高いとみなします。
+    </div>
   </section>
 
   <section class="card">
@@ -250,6 +277,7 @@
   const phaseCountEl=$("phaseCount");
   const cameraAngleSelect=$("cameraAngleSelect"), angleHint=$("angleHint");
   const strokeCountPill=$("strokeCountPill"), strokeHint=$("strokeHint"), strokeList=$("strokeList");
+  const waveGraph=$("waveGraph"), waveCtx=waveGraph.getContext("2d"), waveInfo=$("waveInfo"), waveHint=$("waveHint");
   const durationPill=$("durationPill"), summaryText=$("summaryText"), modeSelect=$("modeSelect"), modeHint=$("modeHint");
   const rMin=$("rMin"),rMax=$("rMax"),rAvg=$("rAvg"),rRange=$("rRange");
   const lMin=$("lMin"),lMax=$("lMax"),lAvg=$("lAvg"),lRange=$("lRange");
@@ -259,6 +287,8 @@
   let rightValidCount=0,leftValidCount=0;
   let formFrames=[];
   let strokeResults=[];
+  let analyzedStrokes=[];
+  let waveformRepeatScore=null;
 
   function log(msg){
     diagEl.textContent += "\n[" + new Date().toLocaleTimeString() + "] " + msg;
@@ -520,9 +550,14 @@
     phaseCountEl.textContent="0 有効フレーム";
     formFrames=[];
     strokeResults=[];
+    analyzedStrokes=[];
+    waveformRepeatScore=null;
     strokeList.innerHTML="";
     strokeCountPill.textContent="0 ストローク";
     strokeHint.textContent="肘角度の伸展ピークを使って、1ストロークごとに自動分割します。";
+    waveInfo.textContent="解析待ち";
+    waveHint.textContent="中央ストロークを0〜100%に正規化して重ねます。線が重なるほど再現性が高いとみなします。";
+    drawWaveGraph();
   }
 
   function choosePrimarySide(){
@@ -584,6 +619,10 @@
     }
     const result=scoreFrameGroup(usable,side);
     if(!result)return;
+    if(waveformRepeatScore!=null){
+      result.repeatScore=waveformRepeatScore;
+      result.total=Math.round(result.catchScore*.25+result.evfScore*.30+result.elbowScore*.30+result.repeatScore*.15);
+    }
     phaseCountEl.textContent=result.validFrames+" 有効 / "+Math.max(0,rawSideCount-usable.length)+" 除外";
     totalScoreEl.textContent=result.total;
     catchScoreEl.textContent=result.catchScore;evfScoreEl.textContent=result.evfScore;
@@ -599,14 +638,133 @@
     adviceText.textContent=`${side==="right"?"右腕":"左腕"}を主解析。最も改善余地が大きいのは「${items[0].name}」です。${items[0].msg}`;
   }
 
+
+  function interpolateStrokeAngles(stroke, points=101){
+    const side=stroke.side;
+    const F=stroke.frames||[];
+    if(F.length<2)return null;
+    const key=side==="right"?"rElbowAngle":"lElbowAngle";
+    const t0=F[0].t, t1=F[F.length-1].t, dur=t1-t0;
+    if(dur<=0)return null;
+
+    const src=F
+      .map(f=>({p:(f.t-t0)/dur,v:f[key]}))
+      .filter(x=>Number.isFinite(x.v))
+      .sort((a,b)=>a.p-b.p);
+
+    if(src.length<2)return null;
+
+    const arr=[];
+    let j=0;
+    for(let i=0;i<points;i++){
+      const p=i/(points-1);
+      while(j<src.length-2 && src[j+1].p<p)j++;
+      const a=src[j], b=src[Math.min(j+1,src.length-1)];
+      if(!a||!b){arr.push(null);continue;}
+      if(b.p===a.p){arr.push(a.v);continue;}
+      const f=(p-a.p)/(b.p-a.p);
+      arr.push(a.v+(b.v-a.v)*Math.max(0,Math.min(1,f)));
+    }
+    return arr;
+  }
+
+  function computeWaveformRepeatability(strokes){
+    const waves=strokes.map(s=>interpolateStrokeAngles(s)).filter(Boolean);
+    if(waves.length<2)return null;
+
+    const pointErrors=[];
+    for(let i=0;i<101;i++){
+      const vals=waves.map(w=>w[i]).filter(Number.isFinite);
+      if(vals.length<2)continue;
+      const m=vals.reduce((a,b)=>a+b,0)/vals.length;
+      const sd=Math.sqrt(vals.reduce((sum,v)=>sum+(v-m)*(v-m),0)/vals.length);
+      pointErrors.push(sd);
+    }
+    if(!pointErrors.length)return null;
+
+    const meanSd=pointErrors.reduce((a,b)=>a+b,0)/pointErrors.length;
+    // 5°以下=100点、25°以上=0点
+    const score=Math.round(100*(1-Math.max(0,Math.min(1,(meanSd-5)/20))));
+    return {score,meanSd,waves};
+  }
+
+  function drawWaveGraph(){
+    const rect=waveGraph.getBoundingClientRect(),dpr=devicePixelRatio||1;
+    waveGraph.width=Math.max(1,Math.round(rect.width*dpr));
+    waveGraph.height=Math.max(1,Math.round(rect.height*dpr));
+    waveCtx.setTransform(dpr,0,0,dpr,0,0);
+
+    const w=rect.width,h=rect.height,p={l:42,r:12,t:12,b:30},iw=w-p.l-p.r,ih=h-p.t-p.b;
+    waveCtx.clearRect(0,0,w,h);
+    waveCtx.fillStyle="#081522";waveCtx.fillRect(0,0,w,h);
+    waveCtx.strokeStyle="#27415b";waveCtx.fillStyle="#8ea4bc";waveCtx.font="11px system-ui";
+
+    [0,45,90,135,180].forEach(v=>{
+      const y=p.t+ih*(1-v/180);
+      waveCtx.beginPath();waveCtx.moveTo(p.l,y);waveCtx.lineTo(w-p.r,y);waveCtx.stroke();
+      waveCtx.fillText(v+"°",5,y+4);
+    });
+    [0,25,50,75,100].forEach(v=>{
+      const x=p.l+iw*(v/100);
+      waveCtx.fillText(v+"%",x-10,h-8);
+    });
+
+    if(!analyzedStrokes.length){
+      waveCtx.fillStyle="#7890aa";waveCtx.font="14px system-ui";waveCtx.textAlign="center";
+      waveCtx.fillText("中央ストロークを解析すると波形を重ねます",w/2,h/2);
+      waveCtx.textAlign="start";
+      return;
+    }
+
+    const rep=computeWaveformRepeatability(analyzedStrokes);
+    if(!rep)return;
+
+    // 個別波形
+    for(const wave of rep.waves){
+      waveCtx.strokeStyle="rgba(70,181,255,.35)";
+      waveCtx.lineWidth=1.5;
+      waveCtx.beginPath();
+      wave.forEach((v,i)=>{
+        const x=p.l+iw*(i/100), y=p.t+ih*(1-v/180);
+        if(i===0)waveCtx.moveTo(x,y);else waveCtx.lineTo(x,y);
+      });
+      waveCtx.stroke();
+    }
+
+    // 平均波形
+    const avg=[];
+    for(let i=0;i<101;i++){
+      const vals=rep.waves.map(w=>w[i]).filter(Number.isFinite);
+      avg.push(vals.reduce((a,b)=>a+b,0)/vals.length);
+    }
+    waveCtx.strokeStyle="#38d39f";
+    waveCtx.lineWidth=3;
+    waveCtx.beginPath();
+    avg.forEach((v,i)=>{
+      const x=p.l+iw*(i/100), y=p.t+ih*(1-v/180);
+      if(i===0)waveCtx.moveTo(x,y);else waveCtx.lineTo(x,y);
+    });
+    waveCtx.stroke();
+
+    waveInfo.textContent=`再現性 ${rep.score}点`;
+    waveHint.textContent=`中央 ${analyzedStrokes.length} ストロークを比較。平均波形SD ${rep.meanSd.toFixed(1)}°。薄い線が各ストローク、太い線が平均です。`;
+  }
+
   function detectStrokeSegments(){
-    strokeResults=[];strokeList.innerHTML="";strokeCountPill.textContent="0 ストローク";
+    strokeResults=[];analyzedStrokes=[];waveformRepeatScore=null;
+    strokeList.innerHTML="";
+    strokeCountPill.textContent="0 ストローク";
+    waveInfo.textContent="解析待ち";
+    waveHint.textContent="中央ストロークを0〜100%に正規化して重ねます。線が重なるほど再現性が高いとみなします。";
+
     const side=choosePrimarySide();
     const F=filteredFormFrames(side);
     if(F.length<20){
       strokeHint.textContent="有効データが少なく、自動分割できませんでした。8〜15秒ほど記録してみてください。";
+      drawWaveGraph();
       return;
     }
+
     const angleKey=side==="right"?"rElbowAngle":"lElbowAngle";
     const candidates=[];
     for(let i=2;i<F.length-2;i++){
@@ -614,6 +772,7 @@
       if(!Number.isFinite(a)||a<130)continue;
       if(a>=F[i-1][angleKey]&&a>=F[i+1][angleKey]&&a>=F[i-2][angleKey]&&a>=F[i+2][angleKey])candidates.push(i);
     }
+
     const peaks=[];
     for(const idx of candidates){
       if(!peaks.length){peaks.push(idx);continue;}
@@ -622,37 +781,83 @@
         if(F[idx][angleKey]>F[last][angleKey])peaks[peaks.length-1]=idx;
       }else peaks.push(idx);
     }
+
     if(peaks.length<2){
       strokeHint.textContent="伸展ピークを2つ以上検出できませんでした。腕を伸ばすところまで含めて2〜4ストローク記録してください。";
+      drawWaveGraph();
       return;
     }
+
     for(let k=0;k<peaks.length-1;k++){
       const a=peaks[k],b=peaks[k+1],seg=F.slice(a,b+1),duration=F[b].t-F[a].t;
       if(duration<0.6||duration>4.0||seg.length<6)continue;
       const score=scoreFrameGroup(seg,side);
       if(!score)continue;
-      strokeResults.push({index:strokeResults.length+1,side,start:F[a].t,end:F[b].t,duration,...score});
+      strokeResults.push({
+        index:strokeResults.length+1,side,start:F[a].t,end:F[b].t,duration,
+        frames:seg,...score
+      });
     }
+
     if(!strokeResults.length){
       strokeHint.textContent="ピークは見つかりましたが、十分な長さのストローク区間を作れませんでした。";
+      drawWaveGraph();
       return;
     }
+
     strokeCountPill.textContent=strokeResults.length+" ストローク";
-    const avg=strokeResults.reduce((s,x)=>s+x.total,0)/strokeResults.length;
-    const sd=stdSafe(strokeResults.map(x=>x.total));
-    strokeHint.textContent=`${side==="right"?"右":"左"}腕を主解析。平均 ${avg.toFixed(1)}点、ストローク間SD ${sd.toFixed(1)}。`;
-    for(const r of strokeResults){
-      const div=document.createElement("div");div.className="strokeCard";
-      div.innerHTML=`<div class="strokeHead"><strong>ストローク ${r.index}</strong><span><span class="strokeScore">${r.total}</span> /100</span></div>
-      <div class="miniGrid">
-        <div class="miniMetric"><span>キャッチ</span><b>${r.catchScore}</b></div>
-        <div class="miniMetric"><span>EVF</span><b>${r.evfScore}</b></div>
-        <div class="miniMetric"><span>肘落ち</span><b>${r.elbowScore}</b></div>
-        <div class="miniMetric"><span>再現性</span><b>${r.repeatScore}</b></div>
-      </div>
-      <div class="confidence">${r.start.toFixed(1)}〜${r.end.toFixed(1)}秒（${r.duration.toFixed(1)}秒）・有効 ${r.validFrames}フレーム</div>`;
+
+    // v2.0: 最初と最後を自動除外。3本未満なら除外しない。
+    if(strokeResults.length>=3){
+      analyzedStrokes=strokeResults.slice(1,-1);
+    }else{
+      analyzedStrokes=[...strokeResults];
+    }
+
+    // 波形再現性を中央ストロークだけで計算
+    const rep=computeWaveformRepeatability(analyzedStrokes);
+    waveformRepeatScore=rep?.score??null;
+
+    // 各ストロークの「再現性」を中央比較スコアに置換
+    if(waveformRepeatScore!=null){
+      for(const r of analyzedStrokes){
+        r.repeatScore=waveformRepeatScore;
+        r.total=Math.round(r.catchScore*.25+r.evfScore*.30+r.elbowScore*.30+r.repeatScore*.15);
+      }
+    }
+
+    // 平均は中央ストロークだけ
+    const scoringSet=analyzedStrokes.length?analyzedStrokes:strokeResults;
+    const avg=scoringSet.reduce((s,x)=>s+x.total,0)/scoringSet.length;
+    const sd=stdSafe(scoringSet.map(x=>x.total));
+
+    const excludedText=strokeResults.length>=3?"最初と最後を自動除外。":"ストローク数が少ないため除外なし。";
+    strokeHint.textContent=`${side==="right"?"右":"左"}腕を主解析。${excludedText} 中央 ${scoringSet.length}本の平均 ${avg.toFixed(1)}点、ストローク間SD ${sd.toFixed(1)}。`;
+
+    for(let i=0;i<strokeResults.length;i++){
+      const r=strokeResults[i];
+      const excluded=(strokeResults.length>=3&&(i===0||i===strokeResults.length-1));
+
+      const div=document.createElement("div");
+      div.className="strokeCard"+(excluded?" excluded":"");
+
+      const repText=excluded ? r.repeatScore : (waveformRepeatScore??r.repeatScore);
+      div.innerHTML=`
+        <div class="strokeHead">
+          <strong>ストローク ${r.index}</strong>
+          <span><span class="strokeScore">${r.total}</span> /100</span>
+        </div>
+        <div class="miniGrid">
+          <div class="miniMetric"><span>キャッチ</span><b>${r.catchScore}</b></div>
+          <div class="miniMetric"><span>EVF</span><b>${r.evfScore}</b></div>
+          <div class="miniMetric"><span>肘落ち</span><b>${r.elbowScore}</b></div>
+          <div class="miniMetric"><span>再現性</span><b>${repText}</b></div>
+        </div>
+        <div class="confidence">${r.start.toFixed(1)}〜${r.end.toFixed(1)}秒（${r.duration.toFixed(1)}秒）・有効 ${r.validFrames}フレーム${excluded?"・操作影響の可能性があるため採点平均から除外":""}</div>`;
       strokeList.appendChild(div);
     }
+
+    drawWaveGraph();
   }
 
 
@@ -737,8 +942,8 @@
         csvBtn.disabled=samples.length===0;
         if(samples.length){
           renderStats();
-          analyzeForm();
           detectStrokeSegments();
+          analyzeForm();
           drawGraph();
         }
       }
@@ -777,7 +982,7 @@
 
   stopBtn.onclick=()=>{
     recording=false;recordBtn.disabled=false;stopBtn.disabled=true;
-    csvBtn.disabled=samples.length===0;setStatus("記録終了","ok");renderStats();analyzeForm();detectStrokeSegments();drawGraph();
+    csvBtn.disabled=samples.length===0;setStatus("記録終了","ok");renderStats();detectStrokeSegments();analyzeForm();drawGraph();
   };
 
   clearBtn.onclick=()=>{
@@ -799,6 +1004,7 @@
       "filter,angle>=10deg_and_speed<=900deg_per_s",
       "mode,"+modeSelect.value,
       "camera_angle,"+cameraAngleSelect.value,
+      "waveform_repeatability_score,"+(waveformRepeatScore??""),
       "right_valid_count,"+rightValidCount,
       "left_valid_count,"+leftValidCount,
       "duration_s,"+(samples[samples.length-1]?.t||0).toFixed(3),
@@ -813,9 +1019,9 @@
     ];
     if(strokeResults.length){
       rows.push("");
-      rows.push("stroke_index,start_s,end_s,duration_s,total,catch,evf,elbow_drop,repeatability,valid_frames");
+      rows.push("stroke_index,start_s,end_s,duration_s,total,catch,evf,elbow_drop,repeatability,valid_frames,used_for_main_analysis");
       for(const r of strokeResults){
-        rows.push([r.index,r.start.toFixed(3),r.end.toFixed(3),r.duration.toFixed(3),r.total,r.catchScore,r.evfScore,r.elbowScore,r.repeatScore,r.validFrames].join(","));
+        rows.push([r.index,r.start.toFixed(3),r.end.toFixed(3),r.duration.toFixed(3),r.total,r.catchScore,r.evfScore,r.elbowScore,r.repeatScore,r.validFrames,analyzedStrokes.includes(r)?"yes":"no"].join(","));
       }
     }
     const blob=new Blob([rows.join("\n")],{type:"text/csv;charset=utf-8"});
@@ -855,7 +1061,7 @@
     plot("right","#46b5ff");plot("left","#38d39f");
   }
 
-  addEventListener("resize",drawGraph);
+  addEventListener("resize",()=>{drawGraph();drawWaveGraph();});
   resetStats();
   resetFormScore();
   drawGraph();
